@@ -3,6 +3,31 @@
 
 use crate::Index;
 
+/// Description of one face-varying channel for a [`TopologyDescriptor`]
+/// (`Far::TopologyDescriptor::FVarChannel`).
+///
+/// A face-varying channel assigns one *value index* to every face-vertex
+/// (corner) of the mesh, allowing data such as UVs to be discontinuous
+/// ("seamed") across edges: two faces sharing an edge may refer to different
+/// values at the shared vertices.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FVarChannelDescriptor<'a> {
+    /// Number of distinct values in the channel.
+    pub num_values: usize,
+    /// One value index per face-vertex, flattened in the same order as
+    /// [`TopologyDescriptor::vert_indices_per_face`].
+    pub value_indices: &'a [Index],
+}
+
+impl<'a> FVarChannelDescriptor<'a> {
+    pub fn new(num_values: usize, value_indices: &'a [Index]) -> Self {
+        Self {
+            num_values,
+            value_indices,
+        }
+    }
+}
+
 /// A simple reference to raw topology data for use with
 /// [`TopologyRefinerFactory`](super::TopologyRefinerFactory) — the port of
 /// `Far::TopologyDescriptor`.
@@ -34,6 +59,9 @@ pub struct TopologyDescriptor<'a> {
 
     /// Indices of faces tagged as holes.
     pub hole_indices: &'a [Index],
+
+    /// Face-varying channels (UVs, per-corner colors, …).
+    pub fvar_channels: &'a [FVarChannelDescriptor<'a>],
 }
 
 impl<'a> TopologyDescriptor<'a> {
@@ -69,6 +97,12 @@ impl<'a> TopologyDescriptor<'a> {
     /// Builder-style setter for hole faces.
     pub fn with_holes(mut self, hole_indices: &'a [Index]) -> Self {
         self.hole_indices = hole_indices;
+        self
+    }
+
+    /// Builder-style setter for face-varying channels.
+    pub fn with_fvar_channels(mut self, channels: &'a [FVarChannelDescriptor<'a>]) -> Self {
+        self.fvar_channels = channels;
         self
     }
 }

@@ -22,6 +22,15 @@ pub enum TopologyError {
     InvalidDescriptorIndex { what: &'static str, index: Index },
     /// A crease was specified between two vertices not connected by an edge.
     CreaseEdgeNotFound { vertices: [Index; 2] },
+    /// A face-varying channel's value array does not have one entry per
+    /// face-vertex.
+    FVarValueCountMismatch {
+        channel: usize,
+        expected: usize,
+        actual: usize,
+    },
+    /// A face-varying channel refers to a value index out of range.
+    FVarValueIndexOutOfRange { channel: usize, index: Index },
 }
 
 impl std::fmt::Display for TopologyError {
@@ -56,6 +65,22 @@ impl std::fmt::Display for TopologyError {
                     f,
                     "no edge between vertices {} and {} for crease",
                     vertices[0], vertices[1]
+                )
+            }
+            TopologyError::FVarValueCountMismatch {
+                channel,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "face-varying channel {channel} has {actual} value indices (expected {expected}, one per face-vertex)"
+                )
+            }
+            TopologyError::FVarValueIndexOutOfRange { channel, index } => {
+                write!(
+                    f,
+                    "face-varying channel {channel} refers to out-of-range value index {index}"
                 )
             }
         }

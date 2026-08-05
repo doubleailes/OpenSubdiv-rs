@@ -74,9 +74,10 @@
 //! numbering of edges (and hence of edge child-vertices) may differ, as it
 //! depends on traversal order internals.
 //!
-//! Not yet ported: adaptive (feature-adaptive) refinement, patch tables,
-//! stencil tables, face-varying channels and the `Osd` GPU layer. See the
-//! project README for the roadmap.
+//! Face-varying channels (UVs with seams, all `FVarLinearInterpolation`
+//! rules) and stencil tables ([`far::StencilTable`]) are supported. Not yet
+//! ported: adaptive (feature-adaptive) refinement, patch tables and the
+//! `Osd` GPU layer. See the project README for the roadmap.
 
 pub mod far;
 pub mod sdc;
