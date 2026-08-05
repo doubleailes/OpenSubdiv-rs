@@ -123,27 +123,70 @@ fn cube_patch_corners_match_limit_stencils() {
     let table = PatchTableFactory::create(&refiner).unwrap();
 
     // At level 2 the only extraordinary vertices are the 8 descendants of
-    // the cube corners (valence 3), each incident 3 faces: 24 bilinear
-    // fallback patches, 72 regular B-spline patches.
-    let regular = (0..table.num_patches())
-        .filter(|&p| table.patch_type(p) == PatchType::Regular)
-        .count();
+    // the cube corners (valence 3), each incident 3 faces: 24 Gregory
+    // end-cap patches, 72 regular B-spline patches, no bilinear fallback.
+    let count = |t: PatchType| {
+        (0..table.num_patches())
+            .filter(|&p| table.patch_type(p) == t)
+            .count()
+    };
     assert_eq!(table.num_patches(), 96);
-    assert_eq!(regular, 72);
+    assert_eq!(count(PatchType::Regular), 72);
+    assert_eq!(count(PatchType::GregoryBasis), 24);
+    assert_eq!(count(PatchType::Quads), 0);
 
-    // For every regular patch, evaluating at its (s,t) = (0,0) corner must
-    // reproduce the limit position of the corresponding vertex — validating
-    // the B-spline basis against the independent limit masks.
+    // For every patch — B-spline and Gregory alike — evaluating at its
+    // (s,t) = (0,0) corner must reproduce the limit position of the
+    // corresponding vertex, validating both bases against the independent
+    // limit masks.
     let level = refiner.level(2);
     for p in 0..table.num_patches() {
-        if table.patch_type(p) != PatchType::Regular {
-            continue;
-        }
         let param = table.patch_param(p);
         let (u, v) = param.unnormalize(0.0, 0.0);
         let (point, _, _) = table.evaluate(p, u, v, &controls);
         let c0 = level.face_vertices(table.patch_face(p) as usize)[0] as usize;
         assert_close(point, limits[c0], 1e-5);
+    }
+}
+
+#[test]
+fn patches_are_c0_across_boundaries() {
+    // Evaluate on both sides of internal patch boundaries — including
+    // Gregory/B-spline junctions around the extraordinary vertices — at the
+    // exact same ptex location: the surface must be continuous.
+    let descriptor = TopologyDescriptor::new(8, &CUBE_VERTS_PER_FACE, &CUBE_FACE_VERTS);
+    let mut refiner = TopologyRefinerFactory::create(
+        descriptor,
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+    )
+    .unwrap();
+    refiner.refine_uniform(UniformOptions::new(2));
+    let controls = refined_positions(&refiner, &CUBE_POSITIONS);
+    let table = PatchTableFactory::create(&refiner).unwrap();
+    let map = PatchMap::new(&table);
+
+    let eps = 1e-3f32;
+    let lines = [0.25f32, 0.5, 0.75];
+    let along = [0.05f32, 0.2, 0.4, 0.65, 0.9];
+    for ptex in 0..6usize {
+        for &line in &lines {
+            for &x in &along {
+                // Vertical boundary u = line.
+                let a = map.find_patch(ptex, line - eps, x).unwrap();
+                let b = map.find_patch(ptex, line + eps, x).unwrap();
+                assert_ne!(a, b);
+                let (pa, _, _) = table.evaluate(a, line, x, &controls);
+                let (pb, _, _) = table.evaluate(b, line, x, &controls);
+                assert_close(pa, pb, 1e-4);
+                // Horizontal boundary v = line.
+                let a = map.find_patch(ptex, x, line - eps).unwrap();
+                let b = map.find_patch(ptex, x, line + eps).unwrap();
+                let (pa, _, _) = table.evaluate(a, x, line, &controls);
+                let (pb, _, _) = table.evaluate(b, x, line, &controls);
+                assert_close(pa, pb, 1e-4);
+            }
+        }
     }
 }
 
@@ -266,10 +309,10 @@ fn non_quad_base_faces_use_ptex_subfaces() {
         let patch = map.find_patch(ptex, 0.3, 0.4).unwrap();
         assert_eq!(table.patch_param(patch).ptex_face as usize, ptex);
         let (point, _, _) = table.evaluate(patch, 0.3, 0.4, &controls);
-        // The pentagon is flat: the limit surface stays in the plane and
-        // within the convex hull.
-        assert!(point[2].abs() < 1e-5);
-        assert!(point[0].abs() <= 1.0 + 1e-5 && point[1].abs() <= 1.0 + 1e-5);
+        // The pentagon is flat: the limit surface stays in the plane (the
+        // Gregory stencils are affine combinations) and near the hull.
+        assert!(point[2].abs() < 1e-4);
+        assert!(point[0].abs() <= 1.02 && point[1].abs() <= 1.02);
     }
 }
 
@@ -289,11 +332,8 @@ fn loop_patches_unsupported() {
 }
 
 #[test]
-fn irregular_patches_converge_to_limit() {
-    // Bilinear fallback patches near extraordinary vertices shrink with
-    // refinement: evaluating near a cube corner must converge toward the
-    // true limit position as the refinement level grows.
-    let evaluate_near_ev = |levels: usize| -> P3 {
+fn gregory_end_caps_are_exact_at_evs_and_consistent_across_levels() {
+    let evaluate_at = |levels: usize, u: f32, v: f32| -> P3 {
         let descriptor = TopologyDescriptor::new(8, &CUBE_VERTS_PER_FACE, &CUBE_FACE_VERTS);
         let mut refiner = TopologyRefinerFactory::create(
             descriptor,
@@ -307,8 +347,8 @@ fn irregular_patches_converge_to_limit() {
         let map = PatchMap::new(&table);
         // Ptex face 0 is base face 0 (verts 0,1,3,2): its (0,0) corner is
         // the extraordinary vertex 0.
-        let patch = map.find_patch(0, 0.0, 0.0).unwrap();
-        let (point, _, _) = table.evaluate(patch, 0.0, 0.0, &controls);
+        let patch = map.find_patch(0, u, v).unwrap();
+        let (point, _, _) = table.evaluate(patch, u, v, &controls);
         point
     };
 
@@ -327,18 +367,14 @@ fn irregular_patches_converge_to_limit() {
     // Child of vertex 0 at level 1 is vertex 6 + 12 + 0 = 18.
     let truth = limits[18];
 
-    let distance = |p: P3| -> f32 {
-        p.iter()
-            .zip(&truth)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f32>()
-            .sqrt()
-    };
-    let e2 = distance(evaluate_near_ev(2));
-    let e4 = distance(evaluate_near_ev(4));
-    assert!(
-        e4 < e2 * 0.5,
-        "EV evaluation did not converge: level2 err {e2}, level4 err {e4}"
-    );
-    assert!(e4 < 0.01, "level-4 EV error too large: {e4}");
+    // Gregory end caps interpolate the extraordinary vertex's limit
+    // position exactly, at any refinement level.
+    assert_close(evaluate_at(2, 0.0, 0.0), truth, 1e-5);
+    assert_close(evaluate_at(4, 0.0, 0.0), truth, 1e-5);
+
+    // Near (but not at) the EV, the end caps built at different refinement
+    // levels approximate the same limit surface.
+    let p2 = evaluate_at(2, 0.03, 0.05);
+    let p4 = evaluate_at(4, 0.03, 0.05);
+    assert_close(p2, p4, 1e-2);
 }

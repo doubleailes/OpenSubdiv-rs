@@ -18,6 +18,7 @@
 //!   base-level control vertices.
 
 mod fvar;
+mod gregory;
 mod patch_table;
 mod primvar_refiner;
 mod ptex;
