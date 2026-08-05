@@ -1,0 +1,74 @@
+//! Ptex face indexing (port of `opensubdiv/far/ptexIndices.h`).
+
+use super::topology_refiner::TopologyRefiner;
+use crate::Index;
+
+/// Mapping between base-level faces and *ptex* face indices
+/// (`Far::PtexIndices`).
+///
+/// The ptex convention parameterizes the subdivision surface by quad
+/// domains: a quadrilateral base face maps to a single ptex face, while an
+/// N-sided base face maps to N ptex faces — one per corner, corresponding
+/// to its N quadrilateral child faces at refinement level 1.
+#[derive(Debug, Clone)]
+pub struct PtexIndices {
+    /// Ptex index of the first ptex face of each base face (+ total).
+    offsets: Vec<u32>,
+    /// Reverse map: base face of each ptex face.
+    base_faces: Vec<Index>,
+    /// Reverse map: corner of the base face each ptex face covers
+    /// (always 0 for quad base faces).
+    corners: Vec<u16>,
+}
+
+impl PtexIndices {
+    pub fn new(refiner: &TopologyRefiner) -> Self {
+        let base = refiner.level(0);
+        let mut offsets = Vec::with_capacity(base.num_faces() + 1);
+        let mut base_faces = Vec::new();
+        let mut corners = Vec::new();
+        offsets.push(0);
+        for f in 0..base.num_faces() {
+            let size = base.face_vertices(f).len();
+            let count = if size == 4 { 1 } else { size };
+            for k in 0..count {
+                base_faces.push(f as Index);
+                corners.push(k as u16);
+            }
+            offsets.push(base_faces.len() as u32);
+        }
+        Self {
+            offsets,
+            base_faces,
+            corners,
+        }
+    }
+
+    /// The total number of ptex faces (`GetNumFaces`).
+    pub fn num_faces(&self) -> usize {
+        self.base_faces.len()
+    }
+
+    /// The ptex index of the first ptex face of base face `face`
+    /// (`GetFaceId`).
+    pub fn face_id(&self, face: usize) -> Index {
+        self.offsets[face]
+    }
+
+    /// The number of ptex faces of base face `face`: 1 for quads, N for
+    /// N-gons.
+    pub fn face_ptex_count(&self, face: usize) -> usize {
+        (self.offsets[face + 1] - self.offsets[face]) as usize
+    }
+
+    /// The base face covered by ptex face `ptex_face`.
+    pub fn base_face(&self, ptex_face: usize) -> Index {
+        self.base_faces[ptex_face]
+    }
+
+    /// The corner of the base face covered by ptex face `ptex_face` (always
+    /// 0 for quad base faces, which map to a single ptex face).
+    pub fn base_face_corner(&self, ptex_face: usize) -> usize {
+        self.corners[ptex_face] as usize
+    }
+}
