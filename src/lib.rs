@@ -75,9 +75,11 @@
 //! depends on traversal order internals.
 //!
 //! Face-varying channels (UVs with seams, all `FVarLinearInterpolation`
-//! rules) and stencil tables ([`far::StencilTable`]) are supported. Not yet
-//! ported: adaptive (feature-adaptive) refinement, patch tables and the
-//! `Osd` GPU layer. See the project README for the roadmap.
+//! rules), stencil tables ([`far::StencilTable`]) and patch tables
+//! ([`far::PatchTable`], for parametric limit evaluation with derivatives)
+//! are supported. Not yet ported: adaptive (feature-adaptive) refinement,
+//! Gregory end-cap patches and the `Osd` GPU layer. See the project README
+//! for the roadmap.
 
 pub mod far;
 pub mod sdc;

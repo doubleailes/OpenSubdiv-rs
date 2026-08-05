@@ -31,6 +31,11 @@ pub enum TopologyError {
     },
     /// A face-varying channel refers to a value index out of range.
     FVarValueIndexOutOfRange { channel: usize, index: Index },
+    /// Patch tables are not yet supported for the Loop scheme.
+    LoopPatchesNotSupported,
+    /// Building patches for a mesh with non-quad faces requires at least one
+    /// level of refinement.
+    PatchesRequireRefinement,
 }
 
 impl std::fmt::Display for TopologyError {
@@ -81,6 +86,15 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "face-varying channel {channel} refers to out-of-range value index {index}"
+                )
+            }
+            TopologyError::LoopPatchesNotSupported => {
+                write!(f, "patch tables are not yet supported for the Loop scheme")
+            }
+            TopologyError::PatchesRequireRefinement => {
+                write!(
+                    f,
+                    "patches for meshes with non-quad faces require at least one refinement level"
                 )
             }
         }

@@ -17,7 +17,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 |--------|------------------|----------|
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform quad/tri refinement |
-| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), and `StencilTable` / `StencilTableFactory` |
+| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
 
 ## Usage
 
@@ -96,6 +96,13 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   meshes via `update_values`
 - **Limit-surface evaluation** of vertex positions (`PrimvarRefiner::limit`),
   including crease and corner limit rules
+- **Patch tables** (`PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices`):
+  parametric evaluation of the limit surface — with first derivatives — at
+  arbitrary `(ptex face, u, v)` locations. Regular neighborhoods (including
+  sharpened boundaries and pinned corners) become exact bicubic B-spline
+  patches; faces touching extraordinary vertices or creases fall back to
+  bilinear quads of the refined level, an approximation that shrinks 4x per
+  refinement level
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -119,10 +126,19 @@ approximation is documented in `far::fvar`: `CornersPlus2` implements
 junction and dart sharpening but not OpenSubdiv's additional concave-corner
 analysis.
 
+Patch tables extract exact bicubic B-spline patches wherever the limit
+surface is polynomial; boundary and corner patches are realized by folding
+the phantom-point reflection `2a − b` into the basis weights, which is
+mathematically equivalent to OpenSubdiv's boundary basis masks. Patches
+touching extraordinary vertices or creases currently fall back to bilinear
+quads of the refined level (as OpenSubdiv's own uniform patch tables do)
+rather than Gregory end-caps.
+
 Not yet ported (roadmap):
 
-- Adaptive (feature-adaptive) refinement
-- `Far::PatchTable` and patch-based limit evaluation (`EvalLimit`)
+- Adaptive (feature-adaptive) refinement and Gregory end-cap patches at
+  extraordinary vertices
+- Loop-scheme (box-spline) patches
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
 
