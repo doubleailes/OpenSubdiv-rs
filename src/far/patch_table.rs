@@ -6,9 +6,18 @@
 //! by ptex face and `(u, v)` location, and evaluable — with first
 //! derivatives — anywhere on their domain.
 //!
-//! ## Patch types
+//! For a uniformly refined mesh, every non-hole face of the last level
+//! yields one patch. For a feature-adaptively refined mesh
+//! ([`TopologyRefiner::refine_adaptive`](super::TopologyRefiner::refine_adaptive)),
+//! each face is patched at the level where it becomes regular, and only
+//! the irregular remainder descends to the isolation cap — the patch count
+//! grows with the mesh's features rather than with `4^level`. Adjacent
+//! patches at different depths evaluate the same limit surface, so
+//! parametric evaluation is seamless (crack-free *tessellation* support —
+//! transition-edge tagging — is not needed for evaluation and is not
+//! provided).
 //!
-//! Every non-hole face of the refiner's last level yields one patch:
+//! ## Patch types
 //!
 //! * [`PatchType::Regular`] — where the face's four corners are *regular*
 //!   (interior valence-4 smooth vertices, or regular boundary/pinned-corner
@@ -29,10 +38,11 @@
 //!   interpolation of the refined face. The approximation error is
 //!   confined to those faces and shrinks with each refinement level.
 //!
-//! Control-vertex indices refer to the vertices of the refiner's **last
-//! level**: evaluate patches against the primvar buffer produced by
-//! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate) for
-//! that level.
+//! Control-vertex indices refer to the **concatenation of every level's
+//! vertices**, base level first: evaluate patches against the base values
+//! followed by each level's
+//! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
+//! output.
 
 use super::gregory::{self, GregoryPoints};
 use super::primvar_refiner::Primvar;
@@ -136,16 +146,28 @@ struct Patch {
 
 /// A table of patches describing the limit surface of a refined mesh
 /// (`Far::PatchTable`).
+///
+/// Patches may live at *mixed depths* (feature-adaptive refinement emits a
+/// patch at the level where its face becomes regular). Control-vertex
+/// indices refer to the **concatenation of every level's vertices**, base
+/// level first — the buffer produced by evaluating
+/// [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
+/// level by level and appending each result to the base values
+/// ([`num_control_values`](Self::num_control_values) in total).
 #[derive(Debug, Clone)]
 pub struct PatchTable {
     patches: Vec<Patch>,
-    /// Patch index of each face of the last level (`INDEX_INVALID` for
-    /// holes).
-    face_to_patch: Vec<Index>,
+    /// Per level: patch index of each face (`INDEX_INVALID` where no patch
+    /// was emitted — holes, refined faces, or unsupported support faces).
+    face_to_patch: Vec<Vec<Index>>,
     ptex: PtexIndices,
     max_level: usize,
-    /// First level-1 child face of each base face.
-    level1_offsets: Vec<u32>,
+    /// Per refinement step: first child face of each parent face
+    /// (`INDEX_INVALID` for faces without children under sparse
+    /// refinement).
+    first_child: Vec<Vec<Index>>,
+    /// Total control values (sum of all levels' vertex counts).
+    num_control_values: usize,
 }
 
 impl PatchTable {
@@ -168,7 +190,9 @@ impl PatchTable {
         self.patches[patch].param
     }
 
-    /// The face of the refiner's last level covered by patch `patch`.
+    /// The face covered by patch `patch`, within the level given by the
+    /// patch's [`PatchParam::depth`] ancestry (for uniform refiners, the
+    /// last level).
     pub fn patch_face(&self, patch: usize) -> Index {
         self.patches[patch].face
     }
@@ -202,6 +226,13 @@ impl PatchTable {
     /// The ptex indexing of the base mesh.
     pub fn ptex_indices(&self) -> &PtexIndices {
         &self.ptex
+    }
+
+    /// The number of control values patch evaluation expects: one value per
+    /// vertex of every refinement level, base level first
+    /// (`GetNumControlVertices`).
+    pub fn num_control_values(&self) -> usize {
+        self.num_control_values
     }
 
     /// Evaluate the patch basis at a location given in the parametric space
@@ -280,8 +311,9 @@ impl PatchTable {
 
     /// Evaluate primvar data on patch `patch` at ptex-face coordinates
     /// `(u, v)`: returns the limit point and its two first derivatives.
-    /// `control_values` holds one value per vertex of the refiner's last
-    /// level.
+    /// `control_values` holds one value per vertex of *every* refinement
+    /// level, base level first
+    /// ([`num_control_values`](Self::num_control_values) in total).
     pub fn evaluate<T: Primvar>(
         &self,
         patch: usize,
@@ -318,7 +350,9 @@ impl<'a> PatchMap<'a> {
     }
 
     /// The patch covering coordinates `(u, v)` of `ptex_face`
-    /// (`FindPatch`); `None` only when the location lies in a hole.
+    /// (`FindPatch`): descends the quadrant hierarchy until a patch is
+    /// found, supporting mixed-depth (adaptive) tables. `None` only when
+    /// the location lies in a hole.
     pub fn find_patch(&self, ptex_face: usize, u: f32, v: f32) -> Option<usize> {
         let table = self.table;
         let base_face = table.ptex.base_face(ptex_face) as usize;
@@ -328,28 +362,30 @@ impl<'a> PatchMap<'a> {
         let (mut face, mut level, mut u, mut v) = if base_is_quad {
             (base_face, 0usize, u, v)
         } else {
-            // Non-quad base faces root their ptex faces at level 1.
+            // Non-quad base faces root their ptex faces at level 1 (their
+            // isolation guarantees at least one refinement).
             let child =
-                table.level1_offsets[base_face] as usize + table.ptex.base_face_corner(ptex_face);
+                table.first_child[0][base_face] as usize + table.ptex.base_face_corner(ptex_face);
             (child, 1usize, u, v)
         };
 
-        while level < table.max_level {
-            let first_child = if level == 0 {
-                table.level1_offsets[face] as usize
-            } else {
-                4 * face
-            };
+        loop {
+            match table.face_to_patch[level][face] {
+                INDEX_INVALID => {}
+                p => return Some(p as usize),
+            }
+            if level >= table.max_level {
+                return None;
+            }
+            let first_child = table.first_child[level][face];
+            if first_child == INDEX_INVALID {
+                return None; // unrefined support face without a patch
+            }
             let (k, nu, nv) = descend_quadrant(u, v);
-            face = first_child + k;
+            face = first_child as usize + k;
             u = nu;
             v = nv;
             level += 1;
-        }
-
-        match table.face_to_patch[face] {
-            INDEX_INVALID => None,
-            p => Some(p as usize),
         }
     }
 }
@@ -369,50 +405,82 @@ impl PatchTableFactory {
             return Err(TopologyError::PatchesRequireRefinement);
         }
 
-        // First level-1 child face of each base face (an N-gon yields N
-        // children).
-        let mut level1_offsets = Vec::with_capacity(base.num_faces());
-        let mut offset = 0u32;
-        for f in 0..base.num_faces() {
-            level1_offsets.push(offset);
-            offset += base.face_vertices(f).len() as u32;
+        let max_level = refiner.max_level();
+
+        // Per refinement step: the first child face of each parent face
+        // (children of one parent are contiguous, in corner order).
+        let mut first_child: Vec<Vec<Index>> = Vec::with_capacity(max_level);
+        for l in 1..=max_level {
+            let refinement = refiner.refinement(l);
+            let mut fc = vec![INDEX_INVALID; refiner.level(l - 1).num_faces()];
+            for cf in 0..refiner.level(l).num_faces() {
+                let parent = refinement.child_face_parent_face(cf) as usize;
+                if fc[parent] == INDEX_INVALID {
+                    fc[parent] = cf as Index;
+                }
+            }
+            first_child.push(fc);
+        }
+
+        // Control values are the concatenation of every level's vertices.
+        let mut level_offsets = Vec::with_capacity(max_level + 1);
+        let mut total = 0usize;
+        for l in 0..=max_level {
+            level_offsets.push(total as Index);
+            total += refiner.level(l).num_vertices();
         }
 
         let ptex = PtexIndices::new(refiner);
-        let max_level = refiner.max_level();
-        let last = refiner.level(max_level);
-        let last_inner = last.inner();
         let smooth_scheme = refiner.scheme_type() == SchemeType::Catmark;
 
         let mut patches = Vec::new();
-        let mut face_to_patch = vec![INDEX_INVALID; last.num_faces()];
+        let mut face_to_patch: Vec<Vec<Index>> = (0..=max_level)
+            .map(|l| vec![INDEX_INVALID; refiner.level(l).num_faces()])
+            .collect();
 
-        for (face, patch_slot) in face_to_patch.iter_mut().enumerate() {
-            if last.is_face_hole(face) {
-                continue;
-            }
-            let param = compute_patch_param(refiner, &ptex, &level1_offsets, face);
-            let kind = if smooth_scheme {
-                if let Some(cvs) = gather_regular_patch(last_inner, face) {
-                    PatchKind::Regular(cvs)
-                } else if let Some(points) = gregory::build(last_inner, face) {
-                    // Smooth interior extraordinary neighborhood: Gregory
-                    // end cap.
-                    PatchKind::Gregory(points)
-                } else {
-                    // Creased or boundary irregularity: bilinear fallback.
-                    PatchKind::Quads(quad_cvs(last_inner, face))
+        for level in 0..=max_level {
+            let level_view = refiner.level(level);
+            let inner = level_view.inner();
+            let offset = level_offsets[level];
+            for (face, patch_slot) in face_to_patch[level].iter_mut().enumerate() {
+                if level_view.is_face_hole(face) || !refiner.face_is_candidate(level, face) {
+                    continue;
                 }
-            } else {
-                // Bilinear: the mesh is its own limit surface.
-                PatchKind::Quads(quad_cvs(last_inner, face))
-            };
-            *patch_slot = patches.len() as Index;
-            patches.push(Patch {
-                param,
-                face: face as Index,
-                kind,
-            });
+                if level < max_level && refiner.face_is_selected(level, face) {
+                    continue; // refined further; patches come from children
+                }
+                let param = compute_patch_param(refiner, &ptex, &first_child, face, level);
+                let kind = if smooth_scheme {
+                    if let Some(mut cvs) = gather_regular_patch(inner, face) {
+                        for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
+                            *cv += offset;
+                        }
+                        PatchKind::Regular(cvs)
+                    } else if let Some(mut points) = gregory::build(inner, face) {
+                        // Smooth interior extraordinary neighborhood:
+                        // Gregory end cap.
+                        for point in points.iter_mut() {
+                            for (cv, _) in point.0.iter_mut() {
+                                *cv += offset;
+                            }
+                        }
+                        PatchKind::Gregory(points)
+                    } else {
+                        // Creased or boundary irregularity: bilinear
+                        // fallback.
+                        PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
+                    }
+                } else {
+                    // Bilinear: the mesh is its own limit surface.
+                    PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
+                };
+                *patch_slot = patches.len() as Index;
+                patches.push(Patch {
+                    param,
+                    face: face as Index,
+                    kind,
+                });
+            }
         }
 
         Ok(PatchTable {
@@ -420,7 +488,8 @@ impl PatchTableFactory {
             face_to_patch,
             ptex,
             max_level,
-            level1_offsets,
+            first_child,
+            num_control_values: total,
         })
     }
 }
@@ -457,16 +526,16 @@ fn descend_quadrant(u: f32, v: f32) -> (usize, f32, f32) {
     (k, x * 2.0, y * 2.0)
 }
 
-/// Compute the [`PatchParam`] of a face of the last level by walking its
+/// Compute the [`PatchParam`] of a face of level `level` by walking its
 /// ancestry down to the ptex root, composing the quadrant transforms
 /// `uv = corner_k + R_k · (child uv) / 2`.
 fn compute_patch_param(
     refiner: &TopologyRefiner,
     ptex: &PtexIndices,
-    level1_offsets: &[u32],
+    first_child: &[Vec<Index>],
     face: usize,
+    level: usize,
 ) -> PatchParam {
-    let max_level = refiner.max_level();
     let mut origin = [0.0f32; 2];
     let mut rotation = 0u8;
     let mut depth = 0u8;
@@ -481,15 +550,15 @@ fn compute_patch_param(
     };
 
     // Steps between levels >= 2 are always quadrants of a quad parent.
-    for level in (2..=max_level).rev() {
-        let parent = refiner.refinement(level).child_face_parent_face(face) as usize;
-        let k = face - 4 * parent;
+    for l in (2..=level).rev() {
+        let parent = refiner.refinement(l).child_face_parent_face(face) as usize;
+        let k = face - first_child[l - 1][parent] as usize;
         compose(&mut origin, &mut rotation, &mut depth, k);
         face = parent;
     }
 
-    if max_level == 0 {
-        // All-quad base mesh with no refinement: the base face is the patch.
+    if level == 0 {
+        // A base-level (quad) face is its own patch domain.
         return PatchParam {
             ptex_face: ptex.face_id(face),
             depth: 0,
@@ -502,7 +571,7 @@ fn compute_patch_param(
     // regular quadrant step of the (single) ptex face; for N-gons the
     // level-1 child *is* the ptex root.
     let base = refiner.refinement(1).child_face_parent_face(face) as usize;
-    let k = face - level1_offsets[base] as usize;
+    let k = face - first_child[0][base] as usize;
     if refiner.level(0).face_vertices(base).len() == 4 {
         compose(&mut origin, &mut rotation, &mut depth, k);
         PatchParam {
@@ -605,6 +674,7 @@ fn diagonal_in_face(level: &Level, face: Index, v: Index) -> Option<Index> {
 
 /// Attempt to classify `face` as a regular B-spline patch and gather its
 /// 4x4 control-vertex grid; phantom (boundary) slots are `INDEX_INVALID`.
+/// Also used by adaptive refinement to decide which faces need isolation.
 ///
 /// The grid is row-major with rows along `t`:
 ///
@@ -614,7 +684,7 @@ fn diagonal_in_face(level: &Level, face: Index, v: Index) -> Option<Index> {
 ///    4  5  6  7        (5, 6, 10, 9) = (c0, c1, c2, c3).
 ///    0  1  2  3
 /// ```
-fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index; 16]> {
+pub(super) fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index; 16]> {
     let fv = level.face_vertices(face);
     if fv.len() != 4 {
         return None;
@@ -708,6 +778,13 @@ fn gather_corner_cv(level: &Level, a: Option<Index>, c: Index, inner: Index) -> 
 /// natural end-condition reproducing sharpened-boundary (crease) behavior,
 /// and — after double reflection at corners — interpolating pinned corners.
 fn fold_phantom_weights(cvs: &[Index; 16], weights: &mut [f32]) {
+    // Which borders are actually missing (interior border slots are phantom
+    // if and only if their whole row/column is).
+    let row0 = cvs[1] == INDEX_INVALID;
+    let row3 = cvs[13] == INDEX_INVALID;
+    let col0 = cvs[4] == INDEX_INVALID;
+    let col3 = cvs[7] == INDEX_INVALID;
+
     for _ in 0..2 {
         for j in 0..4usize {
             for i in 0..4usize {
@@ -715,13 +792,17 @@ fn fold_phantom_weights(cvs: &[Index; 16], weights: &mut [f32]) {
                 if cvs[slot] != INDEX_INVALID || weights[slot] == 0.0 {
                     continue;
                 }
-                let (a, b) = if j == 0 {
+                // Reflect across the border the slot actually hangs off;
+                // corner slots on two missing borders fold in two passes
+                // (the reflections commute).
+                let (a, b) = if j == 0 && row0 {
                     (4 + i, 8 + i) // reflect off rows 1, 2
-                } else if j == 3 {
+                } else if j == 3 && row3 {
                     (8 + i, 4 + i)
-                } else if i == 0 {
+                } else if i == 0 && col0 {
                     (4 * j + 1, 4 * j + 2) // reflect off cols 1, 2
                 } else {
+                    debug_assert!(i == 3 && col3);
                     (4 * j + 2, 4 * j + 1)
                 };
                 let w = weights[slot];
