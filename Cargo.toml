@@ -1,0 +1,16 @@
+[package]
+name = "opensubdiv-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A faithful Rust port of Pixar's OpenSubdiv subdivision-surface library (Sdc / Vtr / Far layers)"
+repository = "https://github.com/doubleailes/OpenSubdiv-rs"
+keywords = ["subdivision", "graphics", "geometry", "catmull-clark", "loop"]
+categories = ["graphics", "mathematics"]
+
+[lib]
+name = "opensubdiv_rs"
+
+[dependencies]
+
+[dev-dependencies]
