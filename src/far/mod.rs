@@ -34,5 +34,5 @@ pub use ptex::PtexIndices;
 pub use stencil_table::{Stencil, StencilTable, StencilTableFactory, StencilTableOptions};
 pub use topology_descriptor::{FVarChannelDescriptor, TopologyDescriptor};
 pub use topology_refiner::{
-    TopologyLevel, TopologyRefiner, TopologyRefinerFactory, UniformOptions,
+    AdaptiveOptions, TopologyLevel, TopologyRefiner, TopologyRefinerFactory, UniformOptions,
 };

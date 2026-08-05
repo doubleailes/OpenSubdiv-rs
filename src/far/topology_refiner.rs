@@ -22,6 +22,21 @@ impl UniformOptions {
     }
 }
 
+/// Options controlling feature-adaptive refinement
+/// (`Far::TopologyRefiner::AdaptiveOptions`).
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptiveOptions {
+    /// The maximum level of refinement applied to isolate irregular
+    /// features (`isolationLevel`).
+    pub isolation_level: usize,
+}
+
+impl AdaptiveOptions {
+    pub fn new(isolation_level: usize) -> Self {
+        Self { isolation_level }
+    }
+}
+
 /// Public interface to the topology of one refinement level
 /// (`Far::TopologyLevel`) — a thin view over a [`crate::vtr::Level`].
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +163,12 @@ pub struct TopologyRefiner {
     levels: Vec<Level>,
     refinements: Vec<Refinement>,
     fvar_channels: Vec<FVarChannel>,
+    /// True when the hierarchy was produced by [`refine_adaptive`]
+    /// (`Self::refine_adaptive`); levels above 0 are then sparse.
+    adaptive: bool,
+    /// For each refinement step, the faces of the parent level that were
+    /// selected for refinement (all `true` for uniform steps).
+    selections: Vec<Vec<bool>>,
 }
 
 impl TopologyRefiner {
@@ -217,16 +238,111 @@ impl TopologyRefiner {
     /// Calling this more than once extends the existing hierarchy if the new
     /// target is deeper; it never discards levels.
     pub fn refine_uniform(&mut self, options: UniformOptions) {
+        assert!(
+            !self.adaptive,
+            "cannot mix uniform and adaptive refinement on one refiner"
+        );
         while self.max_level() < options.refinement_level {
+            let num_faces = self.levels.last().unwrap().num_faces();
             let (child, refinement) = Refinement::refine(self.levels.last().unwrap(), &self.scheme)
                 .expect("refined topology is always internally consistent");
             self.levels.push(child);
             self.refinements.push(refinement);
+            self.selections.push(vec![true; num_faces]);
             // Face-varying channels refine in lockstep with the geometry.
             for channel in &mut self.fvar_channels {
-                channel.refine_once();
+                channel.refine_once(None);
             }
         }
+    }
+
+    /// Feature-adaptively refine the topology (`RefineAdaptive`): starting
+    /// from the base level, only faces whose neighborhood prevents the
+    /// limit surface from being a (boundary-aware) bicubic B-spline patch —
+    /// extraordinary vertices, non-quads, creases — are *selected* and
+    /// subdivided, together with their one-ring support, until they resolve
+    /// or `options.isolation_level` is reached. Levels above 0 are sparse:
+    /// memory grows with the mesh's irregular features, not with `4^level`.
+    ///
+    /// Patches for an adaptively refined mesh live at mixed depths — build
+    /// a [`super::PatchTable`] to evaluate the limit surface.
+    /// [`super::PrimvarRefiner::interpolate`] works level by level as
+    /// usual; [`super::PrimvarRefiner::limit`] and stencil tables require
+    /// uniform refinement.
+    ///
+    /// Adaptive refinement applies to the quad-split schemes: for Bilinear
+    /// only non-quad base faces need one round of isolation, and for Loop
+    /// (whose patches are not yet supported) this is a no-op.
+    pub fn refine_adaptive(&mut self, options: AdaptiveOptions) {
+        assert!(
+            self.max_level() == 0,
+            "adaptive refinement must start from an unrefined refiner"
+        );
+        if self.scheme_type() == SchemeType::Loop {
+            return;
+        }
+        self.adaptive = true;
+
+        while self.max_level() < options.isolation_level {
+            let level_index = self.max_level();
+            let level = self.levels.last().unwrap();
+
+            let mut selected = vec![false; level.num_faces()];
+            let mut any = false;
+            for (f, sel) in selected.iter_mut().enumerate() {
+                if level.is_face_hole(f) || !self.face_is_candidate(level_index, f) {
+                    continue;
+                }
+                let needs_isolation = match self.scheme_type() {
+                    SchemeType::Catmark => {
+                        super::patch_table::gather_regular_patch(level, f).is_none()
+                    }
+                    SchemeType::Bilinear => level.face_vertices(f).len() != 4,
+                    SchemeType::Loop => false,
+                };
+                if needs_isolation {
+                    *sel = true;
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+
+            let (child, refinement) = Refinement::refine_selected(
+                self.levels.last().unwrap(),
+                &self.scheme,
+                Some(&selected),
+            )
+            .expect("refined topology is always internally consistent");
+            self.levels.push(child);
+            self.refinements.push(refinement);
+            for channel in &mut self.fvar_channels {
+                channel.refine_once(Some(&selected));
+            }
+            self.selections.push(selected);
+        }
+    }
+
+    /// Was this refiner refined adaptively (`IsAdaptive`)?
+    pub fn is_adaptive(&self) -> bool {
+        self.adaptive
+    }
+
+    /// Is `face` of `level` a *candidate* for patches or further isolation:
+    /// the base level entirely, and above it the children of selected
+    /// faces (whose neighborhoods are guaranteed complete).
+    pub(super) fn face_is_candidate(&self, level: usize, face: usize) -> bool {
+        if level == 0 {
+            return true;
+        }
+        let parent = self.refinements[level - 1].child_face_parent_face(face) as usize;
+        self.selections[level - 1][parent]
+    }
+
+    /// Was `face` of `level` selected for further refinement?
+    pub(super) fn face_is_selected(&self, level: usize, face: usize) -> bool {
+        level < self.selections.len() && self.selections[level][face]
     }
 }
 
@@ -327,6 +443,8 @@ impl TopologyRefinerFactory {
             levels: vec![level],
             refinements: Vec::new(),
             fvar_channels,
+            adaptive: false,
+            selections: Vec::new(),
         })
     }
 }

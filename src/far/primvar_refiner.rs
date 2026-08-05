@@ -3,10 +3,10 @@
 
 use super::topology_refiner::TopologyRefiner;
 use crate::sdc::{
-    EdgeNeighborhood, EdgeVertexMask, Scheme, Split, VertexNeighborhood, VertexVertexMask,
+    Crease, EdgeNeighborhood, EdgeVertexMask, Scheme, Split, VertexNeighborhood, VertexVertexMask,
 };
 use crate::vtr::{Level, Refinement};
-use crate::Index;
+use crate::{Index, INDEX_INVALID};
 
 /// Interface for primvar data interpolated by [`PrimvarRefiner`].
 ///
@@ -160,6 +160,10 @@ impl<'a> PrimvarRefiner<'a> {
     /// Catmark scheme with non-quad base faces, refine at least once before
     /// calling this.
     pub fn limit<T: Primvar>(&self, src: &[T], dst: &mut [T]) {
+        assert!(
+            !self.refiner.is_adaptive(),
+            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable"
+        );
         limit_level(
             self.refiner.scheme(),
             false,
@@ -173,6 +177,10 @@ impl<'a> PrimvarRefiner<'a> {
     /// (`PrimvarRefiner::LimitFaceVarying`): `src` holds one value per
     /// face-varying value of `channel` at the refiner's last level.
     pub fn limit_face_varying<T: Primvar>(&self, channel: usize, src: &[T], dst: &mut [T]) {
+        assert!(
+            !self.refiner.is_adaptive(),
+            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable"
+        );
         let fvar = self.refiner.fvar_channel(channel);
         limit_level(
             fvar.scheme(),
@@ -206,7 +214,7 @@ fn interpolate_level<T: Primvar>(
     assert!(dst.len() >= child.num_vertices(), "dst buffer too small");
     interpolate_child_verts_from_faces(scheme, refinement, parent, src, dst);
     interpolate_child_verts_from_edges(scheme, linear, refinement, parent, src, dst);
-    interpolate_child_verts_from_verts(scheme, linear, refinement, parent, child, src, dst);
+    interpolate_child_verts_from_verts(scheme, linear, refinement, parent, src, dst);
 }
 
 fn interpolate_child_verts_from_faces<T: Primvar>(
@@ -220,17 +228,20 @@ fn interpolate_child_verts_from_faces<T: Primvar>(
         return; // Triangular splits generate no face child-vertices.
     }
     for f in 0..parent.num_faces() {
+        let cv = refinement.face_child_vertex(f);
+        if cv == INDEX_INVALID {
+            continue; // not refined (sparse refinement)
+        }
         let fv = parent.face_vertices(f);
         // The face mask is the centroid for linear and smooth schemes alike.
         let mask = scheme.compute_face_vertex_mask(fv.len());
 
-        let cv = refinement.face_child_vertex(f) as usize;
         let mut acc = src[fv[0] as usize].clone();
         acc.clear();
         for &v in fv {
             acc.add_with_weight(&src[v as usize], mask.vertex_weight);
         }
-        dst[cv] = acc;
+        dst[cv as usize] = acc;
     }
 }
 
@@ -245,18 +256,31 @@ fn interpolate_child_verts_from_edges<T: Primvar>(
     let mut mask = EdgeVertexMask::default();
 
     for e in 0..parent.num_edges() {
+        let ecv = refinement.edge_child_vertex(e);
+        if ecv == INDEX_INVALID {
+            continue; // not refined (sparse refinement)
+        }
         let [v0, v1] = parent.edge_vertices(e);
         let mut acc = src[v0 as usize].clone();
         acc.clear();
 
-        if linear {
+        let edge_faces = parent.edge_faces(e);
+        // A fringe edge of a sparse refinement can be missing the face
+        // child-vertices its smooth mask references; such vertices only
+        // support the region and are never used by patches, so a crease
+        // (midpoint) fallback suffices.
+        let incomplete = edge_faces
+            .iter()
+            .any(|&f| refinement.face_child_vertex(f as usize) == INDEX_INVALID)
+            && refinement.split() == Split::ToQuads;
+
+        if linear || incomplete {
             acc.add_with_weight(&src[v0 as usize], 0.5);
             acc.add_with_weight(&src[v1 as usize], 0.5);
-            dst[refinement.edge_child_vertex(e) as usize] = acc;
+            dst[ecv as usize] = acc;
             continue;
         }
 
-        let edge_faces = parent.edge_faces(e);
         scheme.compute_edge_vertex_mask(
             &EdgeNeighborhood {
                 sharpness: parent.edge_sharpness(e),
@@ -284,7 +308,7 @@ fn interpolate_child_verts_from_edges<T: Primvar>(
                 acc.add_with_weight(&src[opposite as usize], w);
             }
         }
-        dst[refinement.edge_child_vertex(e) as usize] = acc;
+        dst[ecv as usize] = acc;
     }
 }
 
@@ -293,38 +317,55 @@ fn interpolate_child_verts_from_verts<T: Primvar>(
     linear: bool,
     refinement: &Refinement,
     parent: &Level,
-    child: &Level,
     src: &[T],
     dst: &mut [T],
 ) {
+    let crease = scheme.crease();
     let mut mask = VertexVertexMask::default();
     let mut edge_sharpness = Vec::new();
     let mut child_edge_sharpness = Vec::new();
 
     for v in 0..parent.num_vertices() {
         let cv = refinement.vertex_child_vertex(v);
+        if cv == INDEX_INVALID {
+            continue; // not refined (sparse refinement)
+        }
 
-        if linear {
+        // A fringe vertex of a sparse refinement can be missing children of
+        // its incident components; its child only supports the region and
+        // is never used by patches, so carrying the parent value suffices.
+        let incomplete = parent
+            .vertex_edges(v)
+            .iter()
+            .any(|&e| refinement.edge_child_vertex(e as usize) == INDEX_INVALID)
+            || (refinement.split() == Split::ToQuads
+                && parent
+                    .vertex_faces(v)
+                    .iter()
+                    .any(|&f| refinement.face_child_vertex(f as usize) == INDEX_INVALID));
+
+        if linear || incomplete {
             dst[cv as usize] = src[v].clone();
             continue;
         }
 
-        // Gather the parent-level and child-level sharpness of the
-        // incident edges: the child sharpness of incident edge `e` is
-        // carried by the child (half) edge between this vertex's child
-        // and the edge's midpoint child.
+        // Gather the parent-level sharpness of the incident edges, and
+        // derive the child-level sharpness directly through the creasing
+        // rules — the same computation the refinement applied, valid even
+        // when child topology is sparse.
         parent.gather_vertex_edge_sharpness(v, &mut edge_sharpness);
         child_edge_sharpness.clear();
-        for &e in parent.vertex_edges(v) {
-            let half = child
-                .find_edge(cv, refinement.edge_child_vertex(e as usize))
-                .expect("every parent edge has a child edge at each end");
-            child_edge_sharpness.push(child.edge_sharpness(half as usize));
+        for &sharpness in edge_sharpness.iter() {
+            child_edge_sharpness.push(if Crease::is_sharp(sharpness) {
+                crease.subdivide_edge_sharpness_at_vertex(sharpness, &edge_sharpness)
+            } else {
+                0.0
+            });
         }
 
         let neighborhood = VertexNeighborhood {
             sharpness: parent.vertex_sharpness(v),
-            child_sharpness: child.vertex_sharpness(cv as usize),
+            child_sharpness: crease.subdivide_vertex_sharpness(parent.vertex_sharpness(v)),
             edge_sharpness: &edge_sharpness,
             child_edge_sharpness: &child_edge_sharpness,
             num_faces: parent.vertex_faces(v).len(),

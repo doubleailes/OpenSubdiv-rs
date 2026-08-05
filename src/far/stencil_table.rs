@@ -141,6 +141,10 @@ impl StencilTableFactory {
     /// [`generate_control_verts`](StencilTableOptions::generate_control_verts)
     /// enabled identity stencils for the base vertices are prepended.
     pub fn create(refiner: &TopologyRefiner, options: StencilTableOptions) -> StencilTable {
+        assert!(
+            !refiner.is_adaptive(),
+            "stencil tables require uniform refinement"
+        );
         let num_control = refiner.level(0).num_vertices();
         let primvar = PrimvarRefiner::new(refiner);
 
@@ -171,6 +175,10 @@ impl StencilTableFactory {
     /// Catmark scheme with non-quad base faces, the refiner must hold at
     /// least one level of refinement.
     pub fn create_limit(refiner: &TopologyRefiner) -> StencilTable {
+        assert!(
+            !refiner.is_adaptive(),
+            "limit stencil tables require uniform refinement"
+        );
         let num_control = refiner.level(0).num_vertices();
         let primvar = PrimvarRefiner::new(refiner);
 

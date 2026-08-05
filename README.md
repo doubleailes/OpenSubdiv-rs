@@ -82,6 +82,12 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
 - **Schemes**: Bilinear, Catmull-Clark (arbitrary n-gons), Loop (triangle meshes)
 - **Uniform refinement** to any depth, with full topology (all component
   relations) available at every level
+- **Feature-adaptive refinement** (`refine_adaptive`): only irregular
+  features — extraordinary vertices, non-quads, creases — are isolated,
+  together with their one-ring support, until they resolve or reach the
+  isolation level. Levels above the base are *sparse*: memory grows with
+  the mesh's features, not with `4^level`, while the patch table evaluates
+  the identical limit surface with far fewer patches
 - **Semi-sharp creasing**: edge creases and vertex corners with fractional
   sharpness, `Uniform` and `Chaikin` crease subdivision, and the transitional
   blending of smooth/crease/corner masks across levels
@@ -98,13 +104,14 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   including crease and corner limit rules
 - **Patch tables** (`PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices`):
   parametric evaluation of the limit surface — with first derivatives — at
-  arbitrary `(ptex face, u, v)` locations. Regular neighborhoods (including
-  sharpened boundaries and pinned corners) become exact bicubic B-spline
-  patches; faces around extraordinary vertices are capped with **Gregory
-  patches** (as OpenSubdiv's `ENDCAP_GREGORY_BASIS`), interpolating the EV
-  limit point with C0 boundaries and approximate G1 smoothness; only
-  creased/boundary irregularities fall back to bilinear quads of the
-  refined level
+  arbitrary `(ptex face, u, v)` locations, supporting **mixed-depth**
+  (adaptive) hierarchies: each face is patched at the level where it becomes
+  regular. Regular neighborhoods (including sharpened boundaries and pinned
+  corners) become exact bicubic B-spline patches; faces around extraordinary
+  vertices are capped with **Gregory patches** (as OpenSubdiv's
+  `ENDCAP_GREGORY_BASIS`), interpolating the EV limit point with C0
+  boundaries and approximate G1 smoothness; only creased/boundary
+  irregularities fall back to bilinear quads at the deepest level
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -140,11 +147,20 @@ neighborhoods (for arbitrary control data), pinning every coefficient.
 Creased or boundary irregularities fall back to bilinear quads of the
 refined level.
 
+Feature-adaptive refinement follows OpenSubdiv's approach: faces needing
+isolation are selected level by level with their one-ring support included
+(the role of `Vtr::SparseSelector`), producing sparse levels, and the test
+suite verifies that adaptive and uniform evaluation agree everywhere on the
+same meshes. Transition-edge tagging for crack-free hardware tessellation
+is not provided — parametric evaluation needs none, as adjacent patches at
+different depths evaluate the same limit surface.
+
 Not yet ported (roadmap):
 
-- Adaptive (feature-adaptive) refinement (sparse level topology)
-- Gregory caps for creased/boundary irregular neighborhoods
-- Loop-scheme (box-spline) patches
+- Gregory caps for creased/boundary irregular neighborhoods (bilinear at
+  the cap today); single-crease patches
+- Loop-scheme (box-spline) patches and adaptive refinement for Loop
+- Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
 

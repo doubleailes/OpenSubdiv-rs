@@ -1,22 +1,25 @@
-//! One step of uniform refinement between two levels (port of
-//! `opensubdiv/vtr/refinement.h` — specifically the uniform
-//! `QuadRefinement` / `TriRefinement` paths).
+//! One step of refinement between two levels (port of
+//! `opensubdiv/vtr/refinement.h` — the uniform `QuadRefinement` /
+//! `TriRefinement` paths plus the *sparse* (selected) refinement used by
+//! feature-adaptive isolation, the role of `Vtr::internal::SparseSelector`).
 
 use super::level::{Level, TopologyError};
 use crate::sdc::{Crease, Scheme, Split};
 use crate::{Index, INDEX_INVALID};
 
 /// Mapping between a parent [`Level`] and the child [`Level`] produced by one
-/// step of uniform refinement (`Vtr::internal::Refinement`).
+/// step of refinement (`Vtr::internal::Refinement`).
 ///
 /// Child vertices are ordered by their parent component type: first the
 /// child vertices of *faces* (absent for triangular splits), then those of
-/// *edges*, then those of *vertices*.
+/// *edges*, then those of *vertices*. Under sparse refinement, components
+/// without children map to `INDEX_INVALID`.
 #[derive(Debug, Clone)]
 pub struct Refinement {
     split: Split,
     /// Child vertex originating from each parent face (`INDEX_INVALID` for
-    /// triangular splits, which generate no face vertices).
+    /// triangular splits, which generate no face vertices, and for faces
+    /// excluded by sparse refinement).
     face_child_vert: Vec<Index>,
     /// Child vertex at the midpoint of each parent edge.
     edge_child_vert: Vec<Index>,
@@ -59,40 +62,123 @@ impl Refinement {
     /// refinement mapping (`Refinement::refine`).
     ///
     /// The scheme determines the split (quads for Bilinear/Catmark, tris for
-    /// Loop); creasing options govern how sharpness is subdivided; boundary
-    /// rules are re-applied to the child level.
+    /// Loop); creasing options govern how sharpness is subdivided. Boundary
+    /// sharpening applied to the cage propagates through sharpness
+    /// subdivision, so no per-level re-sharpening is required.
     pub fn refine(parent: &Level, scheme: &Scheme) -> Result<(Level, Refinement), TopologyError> {
+        Self::refine_selected(parent, scheme, None)
+    }
+
+    /// Refine `parent` sparsely: children are generated only for the faces
+    /// flagged in `selection` *plus their one-ring neighborhoods* (the
+    /// supporting faces required so that selected faces' children have
+    /// complete neighborhoods at the child level, as guaranteed by
+    /// OpenSubdiv's `SparseSelector`). Pass `None` to refine everything.
+    pub fn refine_selected(
+        parent: &Level,
+        scheme: &Scheme,
+        selection: Option<&[bool]>,
+    ) -> Result<(Level, Refinement), TopologyError> {
+        let included = match selection {
+            None => vec![true; parent.num_faces()],
+            Some(selected) => {
+                assert_eq!(selected.len(), parent.num_faces());
+                // Expand the selection to its one-ring: any face sharing a
+                // vertex with a selected face is included as support.
+                let mut vertex_marked = vec![false; parent.num_vertices()];
+                for (f, &sel) in selected.iter().enumerate() {
+                    if sel {
+                        for &v in parent.face_vertices(f) {
+                            vertex_marked[v as usize] = true;
+                        }
+                    }
+                }
+                (0..parent.num_faces())
+                    .map(|f| {
+                        parent
+                            .face_vertices(f)
+                            .iter()
+                            .any(|&v| vertex_marked[v as usize])
+                    })
+                    .collect()
+            }
+        };
+
         match scheme.scheme_type().topological_split_type() {
-            Split::ToQuads => Self::refine_quads(parent, scheme),
-            Split::ToTris => Self::refine_tris(parent, scheme),
+            Split::ToQuads => Self::refine_quads(parent, scheme, &included),
+            Split::ToTris => {
+                assert!(
+                    selection.is_none(),
+                    "sparse refinement is not supported for triangular splits"
+                );
+                Self::refine_tris(parent, scheme)
+            }
             Split::Hybrid => unimplemented!("hybrid splits are not used by any scheme"),
         }
     }
 
-    fn refine_quads(parent: &Level, scheme: &Scheme) -> Result<(Level, Refinement), TopologyError> {
+    fn refine_quads(
+        parent: &Level,
+        scheme: &Scheme,
+        included: &[bool],
+    ) -> Result<(Level, Refinement), TopologyError> {
         let (num_faces, num_edges, num_verts) = (
             parent.num_faces(),
             parent.num_edges(),
             parent.num_vertices(),
         );
 
-        // Child vertex ordering: faces, then edges, then vertices.
-        let face_child_vert: Vec<Index> = (0..num_faces as Index).collect();
-        let edge_child_vert: Vec<Index> = (0..num_edges as Index)
-            .map(|e| num_faces as Index + e)
-            .collect();
-        let vert_child_vert: Vec<Index> = (0..num_verts as Index)
-            .map(|v| (num_faces + num_edges) as Index + v)
-            .collect();
-        let num_child_verts = num_faces + num_edges + num_verts;
+        // Child vertices exist only for included faces and the edges and
+        // vertices incident to them. Ordering: faces, then edges, then
+        // vertices.
+        let mut face_child_vert = vec![INDEX_INVALID; num_faces];
+        let mut edge_child_vert = vec![INDEX_INVALID; num_edges];
+        let mut vert_child_vert = vec![INDEX_INVALID; num_verts];
 
-        // An N-sided parent face yields N child quads. Child face `i` is the
-        // quad at corner `i`:  [ corner, leading edge, center, trailing edge ].
-        let num_child_faces = parent.num_face_vertices_total();
-        let mut verts_per_face = Vec::with_capacity(num_child_faces);
-        let mut child_face_verts = Vec::with_capacity(num_child_faces * 4);
-        let mut child_face_parent = Vec::with_capacity(num_child_faces);
-        for (f, &center) in face_child_vert.iter().enumerate() {
+        let mut edge_has_child = vec![false; num_edges];
+        let mut vert_has_child = vec![false; num_verts];
+        for (f, &inc) in included.iter().enumerate() {
+            if inc {
+                for &e in parent.face_edges(f) {
+                    edge_has_child[e as usize] = true;
+                }
+                for &v in parent.face_vertices(f) {
+                    vert_has_child[v as usize] = true;
+                }
+            }
+        }
+
+        let mut next = 0 as Index;
+        for (f, fcv) in face_child_vert.iter_mut().enumerate() {
+            if included[f] {
+                *fcv = next;
+                next += 1;
+            }
+        }
+        for (e, ecv) in edge_child_vert.iter_mut().enumerate() {
+            if edge_has_child[e] {
+                *ecv = next;
+                next += 1;
+            }
+        }
+        for (v, vcv) in vert_child_vert.iter_mut().enumerate() {
+            if vert_has_child[v] {
+                *vcv = next;
+                next += 1;
+            }
+        }
+        let num_child_verts = next as usize;
+
+        // An N-sided included face yields N child quads. Child face `i` is
+        // the quad at corner `i`: [corner, leading edge, center, trailing edge].
+        let mut verts_per_face = Vec::new();
+        let mut child_face_verts = Vec::new();
+        let mut child_face_parent = Vec::new();
+        for (f, &inc) in included.iter().enumerate() {
+            if !inc {
+                continue;
+            }
+            let center = face_child_vert[f];
             let fv = parent.face_vertices(f);
             let fe = parent.face_edges(f);
             let n = fv.len();
@@ -188,7 +274,14 @@ impl Refinement {
     }
 
     /// Build the child level's topology from the generated face list, then
-    /// propagate subdivided sharpness, hole tags and boundary sharpening.
+    /// propagate subdivided sharpness and hole tags.
+    ///
+    /// Boundary sharpening is *not* re-applied here: the cage's boundary
+    /// sharpness (applied once at level 0) propagates exactly through
+    /// sharpness subdivision — infinitely sharp edges and vertices beget
+    /// infinitely sharp children, and refinement never creates new boundary
+    /// corners. This also keeps sparse child levels correct, whose fringe
+    /// edges must not be mistaken for actual mesh boundaries.
     fn finalize_child_level(
         &self,
         parent: &Level,
@@ -204,9 +297,13 @@ impl Refinement {
         // Vertex sharpness: child vertices of parent vertices inherit the
         // subdivided vertex sharpness; all other child vertices are smooth.
         for v in 0..parent.num_vertices() {
+            let cv = self.vert_child_vert[v];
+            if cv == INDEX_INVALID {
+                continue;
+            }
             let s = crease.subdivide_vertex_sharpness(parent.vertex_sharpness(v));
             if Crease::is_sharp(s) {
-                child.set_vertex_sharpness(self.vert_child_vert[v] as usize, s);
+                child.set_vertex_sharpness(cv as usize, s);
             }
         }
 
@@ -216,11 +313,14 @@ impl Refinement {
         // smooth.
         let mut incident = Vec::new();
         for e in 0..parent.num_edges() {
+            let mid = self.edge_child_vert[e];
+            if mid == INDEX_INVALID {
+                continue;
+            }
             let sharpness = parent.edge_sharpness(e);
             if !Crease::is_sharp(sharpness) {
                 continue;
             }
-            let mid = self.edge_child_vert[e];
             for &end in &parent.edge_vertices(e) {
                 parent.gather_vertex_edge_sharpness(end as usize, &mut incident);
                 let child_sharpness =
@@ -240,10 +340,6 @@ impl Refinement {
                 child.set_face_hole(cf, true);
             }
         }
-
-        // Re-apply boundary rules at the child level (idempotent for
-        // boundaries inherited from the parent).
-        child.sharpen_boundaries(crease);
 
         Ok(child)
     }
@@ -312,5 +408,36 @@ mod tests {
                 .unwrap();
             assert_eq!(child.edge_sharpness(half as usize), 1.0);
         }
+    }
+
+    #[test]
+    fn sparse_refinement_includes_one_ring() {
+        // A 5x5 grid of quad faces (6x6 vertices); selecting only the
+        // center face must include exactly its 3x3 one-ring neighborhood.
+        let mut verts_per_face = Vec::new();
+        let mut face_verts: Vec<Index> = Vec::new();
+        for j in 0..5u32 {
+            for i in 0..5u32 {
+                verts_per_face.push(4);
+                let v = j * 6 + i;
+                face_verts.extend_from_slice(&[v, v + 1, v + 7, v + 6]);
+            }
+        }
+        let level = Level::from_face_vertices(36, &verts_per_face, &face_verts).unwrap();
+        let scheme = Scheme::new(SchemeType::Catmark, Options::default());
+
+        let mut selected = vec![false; 25];
+        selected[12] = true; // center face of the 5x5 face grid
+        let (child, refinement) =
+            Refinement::refine_selected(&level, &scheme, Some(&selected)).unwrap();
+
+        // Included: the 3x3 block of faces around face 12 -> 9 faces, each
+        // yielding 4 children.
+        assert_eq!(child.num_faces(), 36);
+        // 9 face children + 24 edge children + 16 vertex children.
+        assert_eq!(child.num_vertices(), 9 + 24 + 16);
+        // Faces outside the block have no children.
+        assert_eq!(refinement.face_child_vertex(0), crate::INDEX_INVALID);
+        assert_ne!(refinement.face_child_vertex(12), crate::INDEX_INVALID);
     }
 }

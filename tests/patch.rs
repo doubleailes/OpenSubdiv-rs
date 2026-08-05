@@ -16,7 +16,18 @@ fn assert_close(actual: P3, expected: P3, tol: f32) {
     }
 }
 
-fn refined_positions(refiner: &TopologyRefiner, base: &[P3]) -> Vec<P3> {
+/// Patch control values: every level's vertex values concatenated, base
+/// level first.
+fn patch_controls(refiner: &TopologyRefiner, base: &[P3]) -> Vec<P3> {
+    let mut all = base.to_vec();
+    for level in PrimvarRefiner::new(refiner).interpolate_all(base) {
+        all.extend(level);
+    }
+    all
+}
+
+/// Vertex values of the refiner's last level only.
+fn last_level_positions(refiner: &TopologyRefiner, base: &[P3]) -> Vec<P3> {
     if refiner.max_level() == 0 {
         return base.to_vec();
     }
@@ -58,7 +69,7 @@ fn grid_patches_have_linear_precision_everywhere() {
         TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
     refiner.refine_uniform(UniformOptions::new(1));
 
-    let controls = refined_positions(&refiner, &positions);
+    let controls = patch_controls(&refiner, &positions);
     let table = PatchTableFactory::create(&refiner).unwrap();
 
     // Every vertex of the grid is regular (interior valence-4, boundary
@@ -116,9 +127,10 @@ fn cube_patch_corners_match_limit_stencils() {
     .unwrap();
     refiner.refine_uniform(UniformOptions::new(2));
 
-    let controls = refined_positions(&refiner, &CUBE_POSITIONS);
-    let mut limits = controls.clone();
-    PrimvarRefiner::new(&refiner).limit(&controls, &mut limits);
+    let controls = patch_controls(&refiner, &CUBE_POSITIONS);
+    let last = last_level_positions(&refiner, &CUBE_POSITIONS);
+    let mut limits = last.clone();
+    PrimvarRefiner::new(&refiner).limit(&last, &mut limits);
 
     let table = PatchTableFactory::create(&refiner).unwrap();
 
@@ -162,7 +174,7 @@ fn patches_are_c0_across_boundaries() {
     )
     .unwrap();
     refiner.refine_uniform(UniformOptions::new(2));
-    let controls = refined_positions(&refiner, &CUBE_POSITIONS);
+    let controls = patch_controls(&refiner, &CUBE_POSITIONS);
     let table = PatchTableFactory::create(&refiner).unwrap();
     let map = PatchMap::new(&table);
 
@@ -211,9 +223,10 @@ fn boundary_and_corner_patches_match_limit_stencils() {
         TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
     refiner.refine_uniform(UniformOptions::new(2));
 
-    let controls = refined_positions(&refiner, &positions);
-    let mut limits = controls.clone();
-    PrimvarRefiner::new(&refiner).limit(&controls, &mut limits);
+    let controls = patch_controls(&refiner, &positions);
+    let last = last_level_positions(&refiner, &positions);
+    let mut limits = last.clone();
+    PrimvarRefiner::new(&refiner).limit(&last, &mut limits);
 
     let table = PatchTableFactory::create(&refiner).unwrap();
     assert_eq!(table.num_patches(), 16);
@@ -304,7 +317,7 @@ fn non_quad_base_faces_use_ptex_subfaces() {
     assert_eq!(table.num_patches(), 5 * 4); // level 2: each ptex face holds 4 patches
 
     let map = PatchMap::new(&table);
-    let controls = refined_positions(&refiner, &positions);
+    let controls = patch_controls(&refiner, &positions);
     for ptex in 0..5 {
         let patch = map.find_patch(ptex, 0.3, 0.4).unwrap();
         assert_eq!(table.patch_param(patch).ptex_face as usize, ptex);
@@ -342,7 +355,7 @@ fn gregory_end_caps_are_exact_at_evs_and_consistent_across_levels() {
         )
         .unwrap();
         refiner.refine_uniform(UniformOptions::new(levels));
-        let controls = refined_positions(&refiner, &CUBE_POSITIONS);
+        let controls = patch_controls(&refiner, &CUBE_POSITIONS);
         let table = PatchTableFactory::create(&refiner).unwrap();
         let map = PatchMap::new(&table);
         // Ptex face 0 is base face 0 (verts 0,1,3,2): its (0,0) corner is
@@ -361,7 +374,7 @@ fn gregory_end_caps_are_exact_at_evs_and_consistent_across_levels() {
     )
     .unwrap();
     refiner.refine_uniform(UniformOptions::new(1));
-    let level1 = refined_positions(&refiner, &CUBE_POSITIONS);
+    let level1 = last_level_positions(&refiner, &CUBE_POSITIONS);
     let mut limits = level1.clone();
     PrimvarRefiner::new(&refiner).limit(&level1, &mut limits);
     // Child of vertex 0 at level 1 is vertex 6 + 12 + 0 = 18.
