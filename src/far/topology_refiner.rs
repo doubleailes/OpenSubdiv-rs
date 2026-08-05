@@ -2,6 +2,7 @@
 //! `opensubdiv/far/topologyRefiner.h` and
 //! `opensubdiv/far/topologyRefinerFactory.h`).
 
+use super::fvar::FVarChannel;
 use super::topology_descriptor::TopologyDescriptor;
 use crate::sdc::{self, Scheme, SchemeType};
 use crate::vtr::{Level, Refinement, TopologyError};
@@ -26,6 +27,8 @@ impl UniformOptions {
 #[derive(Debug, Clone, Copy)]
 pub struct TopologyLevel<'a> {
     level: &'a Level,
+    fvar_channels: &'a [FVarChannel],
+    level_index: usize,
 }
 
 impl<'a> TopologyLevel<'a> {
@@ -109,6 +112,28 @@ impl<'a> TopologyLevel<'a> {
         self.level.is_face_hole(face)
     }
 
+    /// The number of face-varying channels (`GetNumFVarChannels`).
+    pub fn num_fvar_channels(&self) -> usize {
+        self.fvar_channels.len()
+    }
+
+    /// The number of face-varying values of `channel` at this level
+    /// (`GetNumFVarValues`).
+    pub fn num_fvar_values(&self, channel: usize) -> usize {
+        self.fvar_channels[channel]
+            .level(self.level_index)
+            .num_vertices()
+    }
+
+    /// The face-varying values associated with the corners of `face`, in the
+    /// same winding order as [`face_vertices`](Self::face_vertices)
+    /// (`GetFaceFVarValues`).
+    pub fn face_fvar_values(&self, face: usize, channel: usize) -> &'a [Index] {
+        self.fvar_channels[channel]
+            .level(self.level_index)
+            .face_vertices(face)
+    }
+
     pub(super) fn inner(&self) -> &'a Level {
         self.level
     }
@@ -122,6 +147,7 @@ pub struct TopologyRefiner {
     options: sdc::Options,
     levels: Vec<Level>,
     refinements: Vec<Refinement>,
+    fvar_channels: Vec<FVarChannel>,
 }
 
 impl TopologyRefiner {
@@ -154,7 +180,19 @@ impl TopologyRefiner {
     pub fn level(&self, level: usize) -> TopologyLevel<'_> {
         TopologyLevel {
             level: &self.levels[level],
+            fvar_channels: &self.fvar_channels,
+            level_index: level,
         }
+    }
+
+    /// The number of face-varying channels (`GetNumFVarChannels`).
+    pub fn num_fvar_channels(&self) -> usize {
+        self.fvar_channels.len()
+    }
+
+    /// The face-varying channel `channel`.
+    pub fn fvar_channel(&self, channel: usize) -> &FVarChannel {
+        &self.fvar_channels[channel]
     }
 
     /// The refinement that produced level `level` from level `level - 1`.
@@ -184,6 +222,10 @@ impl TopologyRefiner {
                 .expect("refined topology is always internally consistent");
             self.levels.push(child);
             self.refinements.push(refinement);
+            // Face-varying channels refine in lockstep with the geometry.
+            for channel in &mut self.fvar_channels {
+                channel.refine_once();
+            }
         }
     }
 }
@@ -265,11 +307,26 @@ impl TopologyRefinerFactory {
         let scheme = Scheme::new(scheme_type, options);
         level.sharpen_boundaries(scheme.crease());
 
+        // Face-varying channels — built after boundary sharpening so the
+        // geometry's effective sharpness transfers onto the value meshes.
+        let mut fvar_channels = Vec::with_capacity(descriptor.fvar_channels.len());
+        for (c, channel) in descriptor.fvar_channels.iter().enumerate() {
+            fvar_channels.push(FVarChannel::create(
+                &level,
+                scheme_type,
+                options,
+                c,
+                channel.num_values,
+                channel.value_indices,
+            )?);
+        }
+
         Ok(TopologyRefiner {
             scheme,
             options,
             levels: vec![level],
             refinements: Vec::new(),
+            fvar_channels,
         })
     }
 }

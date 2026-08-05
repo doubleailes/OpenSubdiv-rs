@@ -17,7 +17,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 |--------|------------------|----------|
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform quad/tri refinement |
-| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, and `PrimvarRefiner` (`interpolate` + `limit`) |
+| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), and `StencilTable` / `StencilTableFactory` |
 
 ## Usage
 
@@ -86,6 +86,14 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   sharpness, `Uniform` and `Chaikin` crease subdivision, and the transitional
   blending of smooth/crease/corner masks across levels
 - **Boundary interpolation**: `None`, `EdgeOnly`, `EdgeAndCorner`
+- **Face-varying channels** (UVs, per-corner colors) with seams, refined in
+  lockstep with the geometry, supporting all `FVarLinearInterpolation` rules
+  (`All`, `None`, `CornersOnly`, `CornersPlus1`, `CornersPlus2`,
+  `Boundaries`) and face-varying limit evaluation
+- **Stencil tables** (`StencilTable` / `StencilTableFactory`): the whole
+  refinement — or the limit evaluation — factorized into flat per-vertex
+  stencils on the base control vertices, for fast re-posing of animated
+  meshes via `update_values`
 - **Limit-surface evaluation** of vertex positions (`PrimvarRefiner::limit`),
   including crease and corner limit rules
 - **Hole tags**, propagated through refinement
@@ -103,11 +111,18 @@ parent faces, then edges, then vertices); the *numbering* of edges — and hence
 of edge child-vertices — can differ from OpenSubdiv's, as it depends on
 internal traversal order.
 
+Face-varying channels are represented as OpenSubdiv represents them
+conceptually: a channel's values form a mesh of their own in which UV seams
+are boundaries, refined with the same machinery as the geometry after
+encoding the channel's linear-interpolation rule as sharpness. One
+approximation is documented in `far::fvar`: `CornersPlus2` implements
+junction and dart sharpening but not OpenSubdiv's additional concave-corner
+analysis.
+
 Not yet ported (roadmap):
 
-- Face-varying (UV) channels and their linear-interpolation rules
 - Adaptive (feature-adaptive) refinement
-- `Far::PatchTable` / `Far::StencilTable` and patch evaluation (`EvalLimit`)
+- `Far::PatchTable` and patch-based limit evaluation (`EvalLimit`)
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
 

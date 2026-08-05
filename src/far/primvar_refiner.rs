@@ -3,7 +3,7 @@
 
 use super::topology_refiner::TopologyRefiner;
 use crate::sdc::{
-    EdgeNeighborhood, EdgeVertexMask, SchemeType, VertexNeighborhood, VertexVertexMask,
+    EdgeNeighborhood, EdgeVertexMask, Scheme, Split, VertexNeighborhood, VertexVertexMask,
 };
 use crate::vtr::{Level, Refinement};
 use crate::Index;
@@ -92,15 +92,47 @@ impl<'a> PrimvarRefiner<'a> {
             "level {level} out of range 1..={}",
             self.refiner.max_level()
         );
-        let parent = self.refiner.level(level - 1).inner();
-        let child = self.refiner.level(level).inner();
-        let refinement = self.refiner.refinement(level);
-        assert!(src.len() >= parent.num_vertices(), "src buffer too small");
-        assert!(dst.len() >= child.num_vertices(), "dst buffer too small");
+        interpolate_level(
+            self.refiner.scheme(),
+            false,
+            self.refiner.level(level - 1).inner(),
+            self.refiner.level(level).inner(),
+            self.refiner.refinement(level),
+            src,
+            dst,
+        );
+    }
 
-        self.interpolate_child_verts_from_faces(parent, refinement, src, dst);
-        self.interpolate_child_verts_from_edges(parent, refinement, src, dst);
-        self.interpolate_child_verts_from_verts(parent, child, refinement, src, dst);
+    /// Apply face-varying interpolation weights to a primvar buffer for a
+    /// single level of refinement
+    /// (`PrimvarRefiner::InterpolateFaceVarying`).
+    ///
+    /// `src` holds one value per face-varying *value* of `channel` at level
+    /// `level - 1`; `dst` receives one value per face-varying value at level
+    /// `level` (see
+    /// [`TopologyLevel::num_fvar_values`](super::TopologyLevel::num_fvar_values)).
+    pub fn interpolate_face_varying<T: Primvar>(
+        &self,
+        level: usize,
+        channel: usize,
+        src: &[T],
+        dst: &mut [T],
+    ) {
+        assert!(
+            level >= 1 && level <= self.refiner.max_level(),
+            "level {level} out of range 1..={}",
+            self.refiner.max_level()
+        );
+        let fvar = self.refiner.fvar_channel(channel);
+        interpolate_level(
+            fvar.scheme(),
+            fvar.is_linear(),
+            fvar.level(level - 1),
+            fvar.level(level),
+            fvar.refinement(level),
+            src,
+            dst,
+        );
     }
 
     /// Interpolate the whole hierarchy in one call: `base` holds one value
@@ -128,180 +160,247 @@ impl<'a> PrimvarRefiner<'a> {
     /// Catmark scheme with non-quad base faces, refine at least once before
     /// calling this.
     pub fn limit<T: Primvar>(&self, src: &[T], dst: &mut [T]) {
-        let level = self.refiner.level(self.refiner.max_level()).inner();
-        assert!(src.len() >= level.num_vertices(), "src buffer too small");
-        assert!(dst.len() >= level.num_vertices(), "dst buffer too small");
+        limit_level(
+            self.refiner.scheme(),
+            false,
+            self.refiner.level(self.refiner.max_level()).inner(),
+            src,
+            dst,
+        );
+    }
 
-        let scheme = self.refiner.scheme();
-        let mut mask = VertexVertexMask::default();
-        let mut edge_sharpness = Vec::new();
+    /// Apply face-varying *limit* weights to a primvar buffer
+    /// (`PrimvarRefiner::LimitFaceVarying`): `src` holds one value per
+    /// face-varying value of `channel` at the refiner's last level.
+    pub fn limit_face_varying<T: Primvar>(&self, channel: usize, src: &[T], dst: &mut [T]) {
+        let fvar = self.refiner.fvar_channel(channel);
+        limit_level(
+            fvar.scheme(),
+            fvar.is_linear(),
+            fvar.level(self.refiner.max_level()),
+            src,
+            dst,
+        );
+    }
+}
 
-        for v in 0..level.num_vertices() {
-            level.gather_vertex_edge_sharpness(v, &mut edge_sharpness);
-            let neighborhood = VertexNeighborhood {
-                sharpness: level.vertex_sharpness(v),
-                child_sharpness: 0.0,
-                edge_sharpness: &edge_sharpness,
-                child_edge_sharpness: &[],
-                num_faces: level.vertex_faces(v).len(),
-            };
-            scheme.compute_vertex_limit_mask(&neighborhood, &mut mask);
+// ----------------------------------------------------------------------
+//  Level-to-level interpolation (PrimvarRefiner::interpChildVertsFrom*)
+//
+//  These are parameterized over the scheme and the level pair so that the
+//  same passes serve both vertex data (the geometry levels) and
+//  face-varying data (a channel's value-mesh levels). `linear` selects the
+//  purely linear masks used for FVarLinearInterpolation::All.
+// ----------------------------------------------------------------------
 
-            let mut acc = src[v].clone();
-            acc.clear();
-            acc.add_with_weight(&src[v], mask.vertex_weight);
-            for (&e, &w) in level.vertex_edges(v).iter().zip(&mask.edge_weights) {
+fn interpolate_level<T: Primvar>(
+    scheme: &Scheme,
+    linear: bool,
+    parent: &Level,
+    child: &Level,
+    refinement: &Refinement,
+    src: &[T],
+    dst: &mut [T],
+) {
+    assert!(src.len() >= parent.num_vertices(), "src buffer too small");
+    assert!(dst.len() >= child.num_vertices(), "dst buffer too small");
+    interpolate_child_verts_from_faces(scheme, refinement, parent, src, dst);
+    interpolate_child_verts_from_edges(scheme, linear, refinement, parent, src, dst);
+    interpolate_child_verts_from_verts(scheme, linear, refinement, parent, child, src, dst);
+}
+
+fn interpolate_child_verts_from_faces<T: Primvar>(
+    scheme: &Scheme,
+    refinement: &Refinement,
+    parent: &Level,
+    src: &[T],
+    dst: &mut [T],
+) {
+    if refinement.split() == Split::ToTris {
+        return; // Triangular splits generate no face child-vertices.
+    }
+    for f in 0..parent.num_faces() {
+        let fv = parent.face_vertices(f);
+        // The face mask is the centroid for linear and smooth schemes alike.
+        let mask = scheme.compute_face_vertex_mask(fv.len());
+
+        let cv = refinement.face_child_vertex(f) as usize;
+        let mut acc = src[fv[0] as usize].clone();
+        acc.clear();
+        for &v in fv {
+            acc.add_with_weight(&src[v as usize], mask.vertex_weight);
+        }
+        dst[cv] = acc;
+    }
+}
+
+fn interpolate_child_verts_from_edges<T: Primvar>(
+    scheme: &Scheme,
+    linear: bool,
+    refinement: &Refinement,
+    parent: &Level,
+    src: &[T],
+    dst: &mut [T],
+) {
+    let mut mask = EdgeVertexMask::default();
+
+    for e in 0..parent.num_edges() {
+        let [v0, v1] = parent.edge_vertices(e);
+        let mut acc = src[v0 as usize].clone();
+        acc.clear();
+
+        if linear {
+            acc.add_with_weight(&src[v0 as usize], 0.5);
+            acc.add_with_weight(&src[v1 as usize], 0.5);
+            dst[refinement.edge_child_vertex(e) as usize] = acc;
+            continue;
+        }
+
+        let edge_faces = parent.edge_faces(e);
+        scheme.compute_edge_vertex_mask(
+            &EdgeNeighborhood {
+                sharpness: parent.edge_sharpness(e),
+                num_faces: edge_faces.len(),
+            },
+            &mut mask,
+        );
+
+        acc.add_with_weight(&src[v0 as usize], mask.vertex_weights[0]);
+        acc.add_with_weight(&src[v1 as usize], mask.vertex_weights[1]);
+
+        for (&f, &w) in edge_faces.iter().zip(&mask.face_weights) {
+            if w == 0.0 {
+                continue;
+            }
+            if mask.face_weights_for_face_centers {
+                // Catmark: weight the child vertex at the face center,
+                // already computed in the face pass.
+                let fcv = refinement.face_child_vertex(f as usize) as usize;
+                let value = dst[fcv].clone();
+                acc.add_with_weight(&value, w);
+            } else {
+                // Loop: weight the vertex of the face opposite the edge.
+                let opposite = tri_vertex_opposite_edge(parent, f as usize, [v0, v1]);
+                acc.add_with_weight(&src[opposite as usize], w);
+            }
+        }
+        dst[refinement.edge_child_vertex(e) as usize] = acc;
+    }
+}
+
+fn interpolate_child_verts_from_verts<T: Primvar>(
+    scheme: &Scheme,
+    linear: bool,
+    refinement: &Refinement,
+    parent: &Level,
+    child: &Level,
+    src: &[T],
+    dst: &mut [T],
+) {
+    let mut mask = VertexVertexMask::default();
+    let mut edge_sharpness = Vec::new();
+    let mut child_edge_sharpness = Vec::new();
+
+    for v in 0..parent.num_vertices() {
+        let cv = refinement.vertex_child_vertex(v);
+
+        if linear {
+            dst[cv as usize] = src[v].clone();
+            continue;
+        }
+
+        // Gather the parent-level and child-level sharpness of the
+        // incident edges: the child sharpness of incident edge `e` is
+        // carried by the child (half) edge between this vertex's child
+        // and the edge's midpoint child.
+        parent.gather_vertex_edge_sharpness(v, &mut edge_sharpness);
+        child_edge_sharpness.clear();
+        for &e in parent.vertex_edges(v) {
+            let half = child
+                .find_edge(cv, refinement.edge_child_vertex(e as usize))
+                .expect("every parent edge has a child edge at each end");
+            child_edge_sharpness.push(child.edge_sharpness(half as usize));
+        }
+
+        let neighborhood = VertexNeighborhood {
+            sharpness: parent.vertex_sharpness(v),
+            child_sharpness: child.vertex_sharpness(cv as usize),
+            edge_sharpness: &edge_sharpness,
+            child_edge_sharpness: &child_edge_sharpness,
+            num_faces: parent.vertex_faces(v).len(),
+        };
+        scheme.compute_vertex_vertex_mask(&neighborhood, &mut mask);
+
+        let mut acc = src[v].clone();
+        acc.clear();
+        acc.add_with_weight(&src[v], mask.vertex_weight);
+        for (&e, &w) in parent.vertex_edges(v).iter().zip(&mask.edge_weights) {
+            if w != 0.0 {
+                let opposite = parent.edge_opposite_vertex(e as usize, v as Index);
+                acc.add_with_weight(&src[opposite as usize], w);
+            }
+        }
+        if !mask.face_weights.is_empty() {
+            debug_assert!(mask.face_weights_for_face_centers);
+            for (&f, &w) in parent.vertex_faces(v).iter().zip(&mask.face_weights) {
                 if w != 0.0 {
-                    let opposite = level.edge_opposite_vertex(e as usize, v as Index);
-                    acc.add_with_weight(&src[opposite as usize], w);
-                }
-            }
-            if !mask.face_weights.is_empty() {
-                debug_assert!(!mask.face_weights_for_face_centers);
-                for (&f, &w) in level.vertex_faces(v).iter().zip(&mask.face_weights) {
-                    if w != 0.0 {
-                        let diagonal = face_vertex_opposite(level, f as usize, v as Index);
-                        acc.add_with_weight(&src[diagonal as usize], w);
-                    }
-                }
-            }
-            dst[v] = acc;
-        }
-    }
-
-    // ------------------------------------------------------------------
-    //  Interpolation passes (PrimvarRefiner::interpChildVertsFrom*)
-    // ------------------------------------------------------------------
-
-    fn interpolate_child_verts_from_faces<T: Primvar>(
-        &self,
-        parent: &Level,
-        refinement: &Refinement,
-        src: &[T],
-        dst: &mut [T],
-    ) {
-        if self.refiner.scheme_type() == SchemeType::Loop {
-            return; // Triangular splits generate no face child-vertices.
-        }
-        for f in 0..parent.num_faces() {
-            let fv = parent.face_vertices(f);
-            let mask = self.refiner.scheme().compute_face_vertex_mask(fv.len());
-
-            let cv = refinement.face_child_vertex(f) as usize;
-            let mut acc = src[fv[0] as usize].clone();
-            acc.clear();
-            for &v in fv {
-                acc.add_with_weight(&src[v as usize], mask.vertex_weight);
-            }
-            dst[cv] = acc;
-        }
-    }
-
-    fn interpolate_child_verts_from_edges<T: Primvar>(
-        &self,
-        parent: &Level,
-        refinement: &Refinement,
-        src: &[T],
-        dst: &mut [T],
-    ) {
-        let scheme = self.refiner.scheme();
-        let mut mask = EdgeVertexMask::default();
-
-        for e in 0..parent.num_edges() {
-            let edge_faces = parent.edge_faces(e);
-            scheme.compute_edge_vertex_mask(
-                &EdgeNeighborhood {
-                    sharpness: parent.edge_sharpness(e),
-                    num_faces: edge_faces.len(),
-                },
-                &mut mask,
-            );
-
-            let [v0, v1] = parent.edge_vertices(e);
-            let mut acc = src[v0 as usize].clone();
-            acc.clear();
-            acc.add_with_weight(&src[v0 as usize], mask.vertex_weights[0]);
-            acc.add_with_weight(&src[v1 as usize], mask.vertex_weights[1]);
-
-            for (&f, &w) in edge_faces.iter().zip(&mask.face_weights) {
-                if w == 0.0 {
-                    continue;
-                }
-                if mask.face_weights_for_face_centers {
-                    // Catmark: weight the child vertex at the face center,
-                    // already computed in the face pass.
                     let fcv = refinement.face_child_vertex(f as usize) as usize;
                     let value = dst[fcv].clone();
                     acc.add_with_weight(&value, w);
-                } else {
-                    // Loop: weight the vertex of the face opposite the edge.
-                    let opposite = tri_vertex_opposite_edge(parent, f as usize, [v0, v1]);
-                    acc.add_with_weight(&src[opposite as usize], w);
                 }
             }
-            dst[refinement.edge_child_vertex(e) as usize] = acc;
         }
+        dst[cv as usize] = acc;
+    }
+}
+
+// ----------------------------------------------------------------------
+//  Limit evaluation
+// ----------------------------------------------------------------------
+
+fn limit_level<T: Primvar>(scheme: &Scheme, linear: bool, level: &Level, src: &[T], dst: &mut [T]) {
+    assert!(src.len() >= level.num_vertices(), "src buffer too small");
+    assert!(dst.len() >= level.num_vertices(), "dst buffer too small");
+
+    if linear {
+        // The limit of linear interpolation is the data itself.
+        dst[..level.num_vertices()].clone_from_slice(&src[..level.num_vertices()]);
+        return;
     }
 
-    fn interpolate_child_verts_from_verts<T: Primvar>(
-        &self,
-        parent: &Level,
-        child: &Level,
-        refinement: &Refinement,
-        src: &[T],
-        dst: &mut [T],
-    ) {
-        let scheme = self.refiner.scheme();
-        let mut mask = VertexVertexMask::default();
-        let mut edge_sharpness = Vec::new();
-        let mut child_edge_sharpness = Vec::new();
+    let mut mask = VertexVertexMask::default();
+    let mut edge_sharpness = Vec::new();
 
-        for v in 0..parent.num_vertices() {
-            let cv = refinement.vertex_child_vertex(v);
+    for v in 0..level.num_vertices() {
+        level.gather_vertex_edge_sharpness(v, &mut edge_sharpness);
+        let neighborhood = VertexNeighborhood {
+            sharpness: level.vertex_sharpness(v),
+            child_sharpness: 0.0,
+            edge_sharpness: &edge_sharpness,
+            child_edge_sharpness: &[],
+            num_faces: level.vertex_faces(v).len(),
+        };
+        scheme.compute_vertex_limit_mask(&neighborhood, &mut mask);
 
-            // Gather the parent-level and child-level sharpness of the
-            // incident edges: the child sharpness of incident edge `e` is
-            // carried by the child (half) edge between this vertex's child
-            // and the edge's midpoint child.
-            parent.gather_vertex_edge_sharpness(v, &mut edge_sharpness);
-            child_edge_sharpness.clear();
-            for &e in parent.vertex_edges(v) {
-                let half = child
-                    .find_edge(cv, refinement.edge_child_vertex(e as usize))
-                    .expect("every parent edge has a child edge at each end");
-                child_edge_sharpness.push(child.edge_sharpness(half as usize));
+        let mut acc = src[v].clone();
+        acc.clear();
+        acc.add_with_weight(&src[v], mask.vertex_weight);
+        for (&e, &w) in level.vertex_edges(v).iter().zip(&mask.edge_weights) {
+            if w != 0.0 {
+                let opposite = level.edge_opposite_vertex(e as usize, v as Index);
+                acc.add_with_weight(&src[opposite as usize], w);
             }
-
-            let neighborhood = VertexNeighborhood {
-                sharpness: parent.vertex_sharpness(v),
-                child_sharpness: child.vertex_sharpness(cv as usize),
-                edge_sharpness: &edge_sharpness,
-                child_edge_sharpness: &child_edge_sharpness,
-                num_faces: parent.vertex_faces(v).len(),
-            };
-            scheme.compute_vertex_vertex_mask(&neighborhood, &mut mask);
-
-            let mut acc = src[v].clone();
-            acc.clear();
-            acc.add_with_weight(&src[v], mask.vertex_weight);
-            for (&e, &w) in parent.vertex_edges(v).iter().zip(&mask.edge_weights) {
-                if w != 0.0 {
-                    let opposite = parent.edge_opposite_vertex(e as usize, v as Index);
-                    acc.add_with_weight(&src[opposite as usize], w);
-                }
-            }
-            if !mask.face_weights.is_empty() {
-                debug_assert!(mask.face_weights_for_face_centers);
-                for (&f, &w) in parent.vertex_faces(v).iter().zip(&mask.face_weights) {
-                    if w != 0.0 {
-                        let fcv = refinement.face_child_vertex(f as usize) as usize;
-                        let value = dst[fcv].clone();
-                        acc.add_with_weight(&value, w);
-                    }
-                }
-            }
-            dst[cv as usize] = acc;
         }
+        if !mask.face_weights.is_empty() {
+            debug_assert!(!mask.face_weights_for_face_centers);
+            for (&f, &w) in level.vertex_faces(v).iter().zip(&mask.face_weights) {
+                if w != 0.0 {
+                    let diagonal = face_vertex_opposite(level, f as usize, v as Index);
+                    acc.add_with_weight(&src[diagonal as usize], w);
+                }
+            }
+        }
+        dst[v] = acc;
     }
 }
 
