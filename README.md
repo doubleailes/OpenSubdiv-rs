@@ -100,9 +100,11 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   parametric evaluation of the limit surface — with first derivatives — at
   arbitrary `(ptex face, u, v)` locations. Regular neighborhoods (including
   sharpened boundaries and pinned corners) become exact bicubic B-spline
-  patches; faces touching extraordinary vertices or creases fall back to
-  bilinear quads of the refined level, an approximation that shrinks 4x per
-  refinement level
+  patches; faces around extraordinary vertices are capped with **Gregory
+  patches** (as OpenSubdiv's `ENDCAP_GREGORY_BASIS`), interpolating the EV
+  limit point with C0 boundaries and approximate G1 smoothness; only
+  creased/boundary irregularities fall back to bilinear quads of the
+  refined level
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -129,15 +131,19 @@ analysis.
 Patch tables extract exact bicubic B-spline patches wherever the limit
 surface is polynomial; boundary and corner patches are realized by folding
 the phantom-point reflection `2a − b` into the basis weights, which is
-mathematically equivalent to OpenSubdiv's boundary basis masks. Patches
-touching extraordinary vertices or creases currently fall back to bilinear
-quads of the refined level (as OpenSubdiv's own uniform patch tables do)
-rather than Gregory end-caps.
+mathematically equivalent to OpenSubdiv's boundary basis masks. Faces with
+smooth interior extraordinary corners are capped with Gregory patches
+following Loop, Schaefer, Nießner & Castaño's construction — the same basis
+OpenSubdiv's end caps build on; the test suite verifies that the
+construction degenerates to the exact B-spline patch on regular
+neighborhoods (for arbitrary control data), pinning every coefficient.
+Creased or boundary irregularities fall back to bilinear quads of the
+refined level.
 
 Not yet ported (roadmap):
 
-- Adaptive (feature-adaptive) refinement and Gregory end-cap patches at
-  extraordinary vertices
+- Adaptive (feature-adaptive) refinement (sparse level topology)
+- Gregory caps for creased/boundary irregular neighborhoods
 - Loop-scheme (box-spline) patches
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark

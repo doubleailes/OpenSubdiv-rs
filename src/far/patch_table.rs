@@ -18,18 +18,23 @@
 //!   missing control vertices and folding their *phantom-point* reflection
 //!   (`2a - b`) into the basis weights at evaluation time — mathematically
 //!   equivalent to OpenSubdiv's boundary/corner basis masks.
-//! * [`PatchType::Quads`] — anywhere else (patches touching extraordinary
-//!   vertices, creases, or unsharpened `VtxBoundaryInterpolation::None`
-//!   boundaries), the patch falls back to bilinear interpolation of the
-//!   refined face, as OpenSubdiv itself produces for uniform refinement.
-//!   The approximation error is confined to those faces and shrinks with
-//!   each refinement level (Gregory end-cap patches are future work).
+//! * [`PatchType::GregoryBasis`] — faces whose corners are smooth interior
+//!   vertices but include extraordinary valences are capped with a Gregory
+//!   patch (see [`super::gregory`]): 20 derived points giving corner
+//!   limit-point interpolation, exact C0 boundaries and approximate G1
+//!   smoothness, as OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
+//! * [`PatchType::Quads`] — anywhere else (irregularity involving creases,
+//!   boundaries such as unsharpened `VtxBoundaryInterpolation::None`, or
+//!   non-manifold neighborhoods), the patch falls back to bilinear
+//!   interpolation of the refined face. The approximation error is
+//!   confined to those faces and shrinks with each refinement level.
 //!
 //! Control-vertex indices refer to the vertices of the refiner's **last
 //! level**: evaluate patches against the primvar buffer produced by
 //! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate) for
 //! that level.
 
+use super::gregory::{self, GregoryPoints};
 use super::primvar_refiner::Primvar;
 use super::ptex::PtexIndices;
 use super::topology_refiner::TopologyRefiner;
@@ -42,6 +47,9 @@ use crate::{Index, INDEX_INVALID};
 pub enum PatchType {
     /// Bicubic B-spline patch on a 4x4 control-vertex grid.
     Regular,
+    /// Gregory end-cap patch: 20 derived points around an extraordinary
+    /// vertex (`PatchDescriptor::GREGORY_BASIS`).
+    GregoryBasis,
     /// Bilinear quad on the face's 4 vertices.
     Quads,
 }
@@ -107,15 +115,23 @@ pub struct PatchBasis {
 }
 
 #[derive(Debug, Clone)]
+enum PatchKind {
+    /// A 4x4 control-vertex grid (row-major, rows along `t`), with
+    /// `INDEX_INVALID` marking phantom boundary slots.
+    Regular([Index; 16]),
+    /// The 20 Gregory control points as stencils on the last level's
+    /// vertices.
+    Gregory(Box<GregoryPoints>),
+    /// The face's 4 corner vertices.
+    Quads([Index; 4]),
+}
+
+#[derive(Debug, Clone)]
 struct Patch {
-    patch_type: PatchType,
     param: PatchParam,
     /// The face of the last level this patch covers.
     face: Index,
-    /// Control vertices: a 4x4 grid (row-major, rows along `t`) for
-    /// `Regular` — with `INDEX_INVALID` marking phantom boundary slots —
-    /// or the 4 face corners in slots 0-3 for `Quads`.
-    cvs: [Index; 16],
+    kind: PatchKind,
 }
 
 /// A table of patches describing the limit surface of a refined mesh
@@ -140,7 +156,11 @@ impl PatchTable {
 
     /// The basis type of patch `patch`.
     pub fn patch_type(&self, patch: usize) -> PatchType {
-        self.patches[patch].patch_type
+        match &self.patches[patch].kind {
+            PatchKind::Regular(_) => PatchType::Regular,
+            PatchKind::Gregory(_) => PatchType::GregoryBasis,
+            PatchKind::Quads(_) => PatchType::Quads,
+        }
     }
 
     /// The [`PatchParam`] of patch `patch` (`GetPatchParam`).
@@ -155,18 +175,28 @@ impl PatchTable {
 
     /// The control vertices of patch `patch` (`GetPatchVertices`), as
     /// indices into the last level's vertices. Phantom boundary slots of
-    /// regular patches are omitted.
+    /// regular patches are omitted; for Gregory patches this is the union
+    /// of the vertices supporting its 20 derived points.
     pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
-        let p = &self.patches[patch];
-        let n = match p.patch_type {
-            PatchType::Regular => 16,
-            PatchType::Quads => 4,
-        };
-        p.cvs[..n]
-            .iter()
-            .copied()
-            .filter(|&cv| cv != INDEX_INVALID)
-            .collect()
+        match &self.patches[patch].kind {
+            PatchKind::Regular(cvs) => cvs
+                .iter()
+                .copied()
+                .filter(|&cv| cv != INDEX_INVALID)
+                .collect(),
+            PatchKind::Quads(cvs) => cvs.to_vec(),
+            PatchKind::Gregory(points) => {
+                let mut cvs: Vec<Index> = Vec::new();
+                for point in points.iter() {
+                    for &(cv, _) in &point.0 {
+                        if !cvs.contains(&cv) {
+                            cvs.push(cv);
+                        }
+                    }
+                }
+                cvs
+            }
+        }
     }
 
     /// The ptex indexing of the base mesh.
@@ -180,17 +210,36 @@ impl PatchTable {
     pub fn evaluate_basis(&self, patch: usize, u: f32, v: f32) -> PatchBasis {
         let p = &self.patches[patch];
         let (s, t) = p.param.normalize(u, v);
+        // Chain rule to ptex frame: dP/du = Ps·ds/du + Pt·dt/du with
+        // m = [ds/du, ds/dv, dt/du, dt/dv].
         let m = p.param.derivative_matrix();
 
-        let (mut w, mut ws, mut wt);
-        let slots: &[Index];
-        match p.patch_type {
-            PatchType::Regular => {
+        let mut basis = PatchBasis::default();
+        let mut push = |cv: Index, w: f32, ws: f32, wt: f32| {
+            let du = ws * m[0] + wt * m[2];
+            let dv = ws * m[1] + wt * m[3];
+            match basis.indices.iter().position(|&i| i == cv) {
+                Some(k) => {
+                    basis.weights[k] += w;
+                    basis.du_weights[k] += du;
+                    basis.dv_weights[k] += dv;
+                }
+                None => {
+                    basis.indices.push(cv);
+                    basis.weights.push(w);
+                    basis.du_weights.push(du);
+                    basis.dv_weights.push(dv);
+                }
+            }
+        };
+
+        match &p.kind {
+            PatchKind::Regular(cvs) => {
                 let (bu, dbu) = bspline_basis(s);
                 let (bv, dbv) = bspline_basis(t);
-                w = vec![0.0f32; 16];
-                ws = vec![0.0f32; 16];
-                wt = vec![0.0f32; 16];
+                let mut w = [0.0f32; 16];
+                let mut ws = [0.0f32; 16];
+                let mut wt = [0.0f32; 16];
                 for j in 0..4 {
                     for i in 0..4 {
                         w[4 * j + i] = bu[i] * bv[j];
@@ -198,31 +247,33 @@ impl PatchTable {
                         wt[4 * j + i] = bu[i] * dbv[j];
                     }
                 }
-                fold_phantom_weights(&p.cvs, &mut w);
-                fold_phantom_weights(&p.cvs, &mut ws);
-                fold_phantom_weights(&p.cvs, &mut wt);
-                slots = &p.cvs;
+                fold_phantom_weights(cvs, &mut w);
+                fold_phantom_weights(cvs, &mut ws);
+                fold_phantom_weights(cvs, &mut wt);
+                for (slot, &cv) in cvs.iter().enumerate() {
+                    if cv == INDEX_INVALID {
+                        debug_assert!(w[slot] == 0.0 && ws[slot] == 0.0 && wt[slot] == 0.0);
+                        continue;
+                    }
+                    push(cv, w[slot], ws[slot], wt[slot]);
+                }
             }
-            PatchType::Quads => {
-                w = vec![(1.0 - s) * (1.0 - t), s * (1.0 - t), s * t, (1.0 - s) * t];
-                ws = vec![-(1.0 - t), 1.0 - t, t, -t];
-                wt = vec![-(1.0 - s), -s, s, 1.0 - s];
-                slots = &p.cvs[..4];
+            PatchKind::Quads(cvs) => {
+                let w = [(1.0 - s) * (1.0 - t), s * (1.0 - t), s * t, (1.0 - s) * t];
+                let ws = [-(1.0 - t), 1.0 - t, t, -t];
+                let wt = [-(1.0 - s), -s, s, 1.0 - s];
+                for (slot, &cv) in cvs.iter().enumerate() {
+                    push(cv, w[slot], ws[slot], wt[slot]);
+                }
             }
-        }
-
-        let mut basis = PatchBasis::default();
-        for (slot, &cv) in slots.iter().enumerate() {
-            if cv == INDEX_INVALID {
-                debug_assert!(w[slot] == 0.0 && ws[slot] == 0.0 && wt[slot] == 0.0);
-                continue;
+            PatchKind::Gregory(points) => {
+                let (w20, ws20, wt20) = gregory::evaluate_basis(s, t);
+                for (point, stencil) in points.iter().enumerate() {
+                    for &(cv, sw) in &stencil.0 {
+                        push(cv, w20[point] * sw, ws20[point] * sw, wt20[point] * sw);
+                    }
+                }
             }
-            basis.indices.push(cv);
-            basis.weights.push(w[slot]);
-            // Chain rule: dP/du = Ps·ds/du + Pt·dt/du (m = [ds/du, ds/dv,
-            // dt/du, dt/dv]).
-            basis.du_weights.push(ws[slot] * m[0] + wt[slot] * m[2]);
-            basis.dv_weights.push(ws[slot] * m[1] + wt[slot] * m[3]);
         }
         basis
     }
@@ -341,21 +392,26 @@ impl PatchTableFactory {
                 continue;
             }
             let param = compute_patch_param(refiner, &ptex, &level1_offsets, face);
-            let (patch_type, cvs) = if smooth_scheme {
-                match gather_regular_patch(last_inner, face) {
-                    Some(cvs) => (PatchType::Regular, cvs),
-                    None => (PatchType::Quads, quad_cvs(last_inner, face)),
+            let kind = if smooth_scheme {
+                if let Some(cvs) = gather_regular_patch(last_inner, face) {
+                    PatchKind::Regular(cvs)
+                } else if let Some(points) = gregory::build(last_inner, face) {
+                    // Smooth interior extraordinary neighborhood: Gregory
+                    // end cap.
+                    PatchKind::Gregory(points)
+                } else {
+                    // Creased or boundary irregularity: bilinear fallback.
+                    PatchKind::Quads(quad_cvs(last_inner, face))
                 }
             } else {
                 // Bilinear: the mesh is its own limit surface.
-                (PatchType::Quads, quad_cvs(last_inner, face))
+                PatchKind::Quads(quad_cvs(last_inner, face))
             };
             *patch_slot = patches.len() as Index;
             patches.push(Patch {
-                patch_type,
                 param,
                 face: face as Index,
-                cvs,
+                kind,
             });
         }
 
@@ -469,10 +525,10 @@ fn compute_patch_param(
 //  Regular-patch classification and control-vertex gathering
 // ----------------------------------------------------------------------
 
-fn quad_cvs(level: &Level, face: usize) -> [Index; 16] {
+fn quad_cvs(level: &Level, face: usize) -> [Index; 4] {
     let fv = level.face_vertices(face);
-    let mut cvs = [INDEX_INVALID; 16];
-    cvs[..4].copy_from_slice(fv);
+    let mut cvs = [INDEX_INVALID; 4];
+    cvs.copy_from_slice(fv);
     cvs
 }
 
