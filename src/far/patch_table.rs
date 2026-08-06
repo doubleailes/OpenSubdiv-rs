@@ -118,9 +118,13 @@ impl PatchParam {
 /// derivatives with respect to the ptex-face `(u, v)`.
 #[derive(Debug, Clone, Default)]
 pub struct PatchBasis {
+    /// Indices of the contributing control vertices.
     pub indices: Vec<Index>,
+    /// Weight of each control vertex for the limit position.
     pub weights: Vec<f32>,
+    /// Weight of each control vertex for the derivative along `u`.
     pub du_weights: Vec<f32>,
+    /// Weight of each control vertex for the derivative along `v`.
     pub dv_weights: Vec<f32>,
 }
 
@@ -345,6 +349,7 @@ pub struct PatchMap<'a> {
 }
 
 impl<'a> PatchMap<'a> {
+    /// Build a map over the patches of `table`.
     pub fn new(table: &'a PatchTable) -> Self {
         Self { table }
     }
@@ -395,6 +400,15 @@ impl<'a> PatchMap<'a> {
 pub struct PatchTableFactory;
 
 impl PatchTableFactory {
+    /// Build a [`PatchTable`] covering the limit surface of `refiner`
+    /// (`PatchTableFactory::Create`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TopologyError::LoopPatchesNotSupported`] for schemes that do
+    /// not split faces into quads, and
+    /// [`TopologyError::PatchesRequireRefinement`] when the base mesh contains
+    /// non-quad faces and `refiner` has not been refined at least once.
     pub fn create(refiner: &TopologyRefiner) -> Result<PatchTable, TopologyError> {
         if refiner.scheme_type().topological_split_type() != Split::ToQuads {
             return Err(TopologyError::LoopPatchesNotSupported);

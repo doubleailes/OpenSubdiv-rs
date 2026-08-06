@@ -9,28 +9,69 @@ use crate::{Index, INDEX_INVALID};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopologyError {
     /// A face has fewer than three vertices.
-    DegenerateFace { face: usize, size: usize },
+    DegenerateFace {
+        /// Index of the offending face.
+        face: usize,
+        /// Number of vertices the face was given.
+        size: usize,
+    },
     /// A face refers to a vertex index out of range.
-    VertexIndexOutOfRange { face: usize, vertex: Index },
+    VertexIndexOutOfRange {
+        /// Index of the offending face.
+        face: usize,
+        /// The out-of-range vertex index.
+        vertex: Index,
+    },
     /// A face uses the same vertex more than once.
-    RepeatedVertexInFace { face: usize, vertex: Index },
+    RepeatedVertexInFace {
+        /// Index of the offending face.
+        face: usize,
+        /// The vertex index that appears more than once.
+        vertex: Index,
+    },
     /// The flattened face-vertex array does not match the per-face counts.
-    FaceVertexCountMismatch { expected: usize, actual: usize },
+    FaceVertexCountMismatch {
+        /// Total face-vertex count implied by the per-face vertex counts.
+        expected: usize,
+        /// Length of the flattened face-vertex array actually given.
+        actual: usize,
+    },
     /// The Loop scheme requires a purely triangular mesh.
-    NonTriangularFaceForLoop { face: usize, size: usize },
+    NonTriangularFaceForLoop {
+        /// Index of the offending face.
+        face: usize,
+        /// Number of vertices of that face.
+        size: usize,
+    },
     /// A crease/corner/hole descriptor entry refers to an invalid component.
-    InvalidDescriptorIndex { what: &'static str, index: Index },
+    InvalidDescriptorIndex {
+        /// Name of the descriptor field holding the invalid index.
+        what: &'static str,
+        /// The invalid component index.
+        index: Index,
+    },
     /// A crease was specified between two vertices not connected by an edge.
-    CreaseEdgeNotFound { vertices: [Index; 2] },
+    CreaseEdgeNotFound {
+        /// The vertex pair for which no edge exists.
+        vertices: [Index; 2],
+    },
     /// A face-varying channel's value array does not have one entry per
     /// face-vertex.
     FVarValueCountMismatch {
+        /// Index of the offending face-varying channel.
         channel: usize,
+        /// Number of face-vertices in the mesh.
         expected: usize,
+        /// Length of the channel's index array.
         actual: usize,
     },
     /// A face-varying channel refers to a value index out of range.
-    FVarValueIndexOutOfRange { channel: usize, index: Index },
+    FVarValueIndexOutOfRange {
+        /// Index of the offending face-varying channel.
+        channel: usize,
+        /// The out-of-range face-varying value index.
+        index: Index,
+    },
     /// Patch tables are not yet supported for the Loop scheme.
     LoopPatchesNotSupported,
     /// Building patches for a mesh with non-quad faces requires at least one
@@ -270,14 +311,17 @@ impl Level {
     //  Sizes
     // ------------------------------------------------------------------
 
+    /// Number of vertices in this level (`GetNumVertices`).
     pub fn num_vertices(&self) -> usize {
         self.num_vertices
     }
 
+    /// Number of edges in this level (`GetNumEdges`).
     pub fn num_edges(&self) -> usize {
         self.edge_verts.len()
     }
 
+    /// Number of faces in this level (`GetNumFaces`).
     pub fn num_faces(&self) -> usize {
         self.face_vert_offsets.len().saturating_sub(1)
     }
@@ -386,26 +430,36 @@ impl Level {
     //  Sharpness and holes
     // ------------------------------------------------------------------
 
+    /// Sharpness assigned to `edge` ([`SHARPNESS_SMOOTH`](crate::sdc::SHARPNESS_SMOOTH)
+    /// = smooth, [`SHARPNESS_INFINITE`](crate::sdc::SHARPNESS_INFINITE) = fully
+    /// sharp).
     pub fn edge_sharpness(&self, edge: usize) -> f32 {
         self.edge_sharpness[edge]
     }
 
+    /// Sharpness assigned to `vertex` (a corner weight).
     pub fn vertex_sharpness(&self, vertex: usize) -> f32 {
         self.vert_sharpness[vertex]
     }
 
+    /// Assign `edge`'s sharpness, clamped to the valid range by
+    /// [`Crease::clamp`].
     pub fn set_edge_sharpness(&mut self, edge: usize, sharpness: f32) {
         self.edge_sharpness[edge] = Crease::clamp(sharpness);
     }
 
+    /// Assign `vertex`'s corner sharpness, clamped to the valid range by
+    /// [`Crease::clamp`].
     pub fn set_vertex_sharpness(&mut self, vertex: usize, sharpness: f32) {
         self.vert_sharpness[vertex] = Crease::clamp(sharpness);
     }
 
+    /// Is `face` tagged as a hole? Holes are subdivided but not rendered.
     pub fn is_face_hole(&self, face: usize) -> bool {
         self.face_holes[face]
     }
 
+    /// Tag (or untag) `face` as a hole.
     pub fn set_face_hole(&mut self, face: usize, hole: bool) {
         self.face_holes[face] = hole;
     }

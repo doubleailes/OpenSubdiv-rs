@@ -110,6 +110,8 @@ pub struct Scheme {
 }
 
 impl Scheme {
+    /// Create the rules for `scheme_type` under the given subdivision
+    /// `options`.
     pub fn new(scheme_type: SchemeType, options: Options) -> Self {
         Self {
             scheme_type,
@@ -117,10 +119,12 @@ impl Scheme {
         }
     }
 
+    /// The subdivision scheme these rules apply.
     pub fn scheme_type(&self) -> SchemeType {
         self.scheme_type
     }
 
+    /// The creasing queries derived from this scheme's options.
     pub fn crease(&self) -> &Crease {
         &self.crease
     }

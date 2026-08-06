@@ -15,6 +15,7 @@ pub const SHARPNESS_INFINITE: f32 = 10.0;
 /// of the vertex and of its incident edges (`Sdc::Crease::Rule`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Rule {
+    /// The rule has not been determined yet.
     Unknown,
     /// No sharp features: the full smooth mask applies.
     Smooth,
@@ -38,6 +39,7 @@ pub struct Crease {
 }
 
 impl Crease {
+    /// Create the creasing queries for the given subdivision `options`.
     pub fn new(options: Options) -> Self {
         Self { options }
     }

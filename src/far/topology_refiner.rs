@@ -17,6 +17,7 @@ pub struct UniformOptions {
 }
 
 impl UniformOptions {
+    /// Refine uniformly `refinement_level` times.
     pub fn new(refinement_level: usize) -> Self {
         Self { refinement_level }
     }
@@ -32,6 +33,7 @@ pub struct AdaptiveOptions {
 }
 
 impl AdaptiveOptions {
+    /// Isolate irregular features up to `isolation_level` levels deep.
     pub fn new(isolation_level: usize) -> Self {
         Self { isolation_level }
     }
@@ -47,14 +49,17 @@ pub struct TopologyLevel<'a> {
 }
 
 impl<'a> TopologyLevel<'a> {
+    /// The number of vertices in this level (`GetNumVertices`).
     pub fn num_vertices(&self) -> usize {
         self.level.num_vertices()
     }
 
+    /// The number of edges in this level (`GetNumEdges`).
     pub fn num_edges(&self) -> usize {
         self.level.num_edges()
     }
 
+    /// The number of faces in this level (`GetNumFaces`).
     pub fn num_faces(&self) -> usize {
         self.level.num_faces()
     }
@@ -110,14 +115,18 @@ impl<'a> TopologyLevel<'a> {
         self.level.vertex_sharpness(vertex)
     }
 
+    /// Does `edge` lie on a mesh boundary (`IsEdgeBoundary`)?
     pub fn is_edge_boundary(&self, edge: usize) -> bool {
         self.level.is_edge_boundary(edge)
     }
 
+    /// Is `edge` non-manifold, i.e. shared by more than two faces
+    /// (`IsEdgeNonManifold`)?
     pub fn is_edge_non_manifold(&self, edge: usize) -> bool {
         self.level.is_edge_non_manifold(edge)
     }
 
+    /// Does `vertex` lie on a mesh boundary (`IsVertexBoundary`)?
     pub fn is_vertex_boundary(&self, vertex: usize) -> bool {
         self.level.is_vertex_boundary(vertex)
     }
