@@ -22,6 +22,8 @@ pub struct PtexIndices {
 }
 
 impl PtexIndices {
+    /// Compute the ptex-face indexing for the base level of `refiner`
+    /// (`PtexIndices::PtexIndices`).
     pub fn new(refiner: &TopologyRefiner) -> Self {
         let base = refiner.level(0);
         let mut offsets = Vec::with_capacity(base.num_faces() + 1);

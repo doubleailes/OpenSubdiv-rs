@@ -83,6 +83,10 @@
 //! mixed-depth patches) are supported. Not yet ported: the `Osd` GPU
 //! layer. See the project README for the roadmap.
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
 pub mod far;
 pub mod sdc;
 pub mod vtr;

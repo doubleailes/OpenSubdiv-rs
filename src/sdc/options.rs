@@ -73,13 +73,18 @@ pub enum TriangleSubdivision {
 /// matches OpenSubdiv's defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Options {
+    /// How vertices and edges on a mesh boundary are interpolated.
     pub vtx_boundary_interpolation: VtxBoundaryInterpolation,
+    /// How face-varying data is interpolated around seams and boundaries.
     pub fvar_linear_interpolation: FVarLinearInterpolation,
+    /// How semi-sharp creases decay under subdivision.
     pub creasing_method: CreasingMethod,
+    /// Which weights are used when subdividing triangles.
     pub triangle_subdivision: TriangleSubdivision,
 }
 
 impl Options {
+    /// Options with every field set to its OpenSubdiv default.
     pub fn new() -> Self {
         Self::default()
     }

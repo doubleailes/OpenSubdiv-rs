@@ -20,6 +20,8 @@ pub struct FVarChannelDescriptor<'a> {
 }
 
 impl<'a> FVarChannelDescriptor<'a> {
+    /// Describe a channel with `num_values` distinct values, indexed once per
+    /// face-vertex by `value_indices`.
     pub fn new(num_values: usize, value_indices: &'a [Index]) -> Self {
         Self {
             num_values,

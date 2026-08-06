@@ -1,5 +1,10 @@
 # OpenSubdiv-rs
 
+[![crates.io](https://img.shields.io/crates/v/opensubdiv-rs.svg)](https://crates.io/crates/opensubdiv-rs)
+[![docs.rs](https://img.shields.io/docsrs/opensubdiv-rs)](https://docs.rs/opensubdiv-rs)
+[![CI](https://github.com/doubleailes/OpenSubdiv-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/doubleailes/OpenSubdiv-rs/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/opensubdiv-rs.svg)](LICENSE)
+
 A faithful Rust port of [Pixar's OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv)
 subdivision-surface library.
 
@@ -18,6 +23,22 @@ The port follows OpenSubdiv's layer structure one-to-one:
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform quad/tri refinement |
 | `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
+
+## Installation
+
+```sh
+cargo add opensubdiv-rs
+```
+
+or, in `Cargo.toml`:
+
+```toml
+[dependencies]
+opensubdiv-rs = "0.1"
+```
+
+The crate has no dependencies and contains no `unsafe` code
+(`#![forbid(unsafe_code)]`).
 
 ## Usage
 
@@ -163,6 +184,15 @@ Not yet ported (roadmap):
 - Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
+
+## Minimum supported Rust version
+
+The MSRV is **1.85**, checked in CI. Raising it is treated as a
+minor-version change.
+
+## Changelog
+
+Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

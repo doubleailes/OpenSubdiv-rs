@@ -16,7 +16,9 @@ use crate::Index;
 /// (`Far::Stencil`).
 #[derive(Debug, Clone, Copy)]
 pub struct Stencil<'a> {
+    /// Indices of the contributing control vertices.
     pub indices: &'a [Index],
+    /// Weight of each control vertex, in the same order as `indices`.
     pub weights: &'a [f32],
 }
 

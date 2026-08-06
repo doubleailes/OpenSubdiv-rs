@@ -66,6 +66,7 @@ pub struct PrimvarRefiner<'a> {
 }
 
 impl<'a> PrimvarRefiner<'a> {
+    /// Create a primvar refiner driven by the topology of `refiner`.
     pub fn new(refiner: &'a TopologyRefiner) -> Self {
         Self { refiner }
     }
