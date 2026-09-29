@@ -17,7 +17,14 @@
 //! refined with the same [`Refinement`] machinery as the geometry, after
 //! encoding the channel's [linear-interpolation
 //! rule](crate::sdc::FVarLinearInterpolation) as sharpness on that value
-//! mesh:
+//! mesh. As in OpenSubdiv, a value is a property of a *geometric vertex*: a
+//! value index reused at several vertices (a deduplicated UV, say) is one
+//! independent value at each of them, so the base value mesh gets one vertex
+//! per distinct (vertex, value index) pair. The caller's indices are kept for
+//! the base level's API and for gathering the source values of the first
+//! interpolation step; refined levels only ever see the split values.
+//!
+//! The linear-interpolation rules map onto the value mesh as follows:
 //!
 //! * `All` — every mask is linear; no sharpening needed.
 //! * `None` — value-mesh boundaries (seams) subdivide as smooth crease
@@ -41,6 +48,7 @@
 use crate::sdc::{self, Crease, FVarLinearInterpolation, Scheme, SchemeType};
 use crate::vtr::{Level, Refinement, TopologyError};
 use crate::Index;
+use std::borrow::Cow;
 
 /// One face-varying channel of a
 /// [`TopologyRefiner`](super::TopologyRefiner): the hierarchy of value-mesh
@@ -54,6 +62,15 @@ pub struct FVarChannel {
     scheme: Scheme,
     /// True when every mask is linear (`FVarLinearInterpolation::All`).
     linear: bool,
+    /// The number of values the channel was described with.
+    num_base_values: usize,
+    /// The caller's value index of each base-level face-corner.
+    base_face_values: Vec<Index>,
+    /// The caller's value index of each base value-mesh vertex, when some
+    /// index is reused at several geometric vertices and the value mesh
+    /// therefore has more vertices than the channel has values; `None`
+    /// when the two coincide.
+    base_value_sources: Option<Vec<Index>>,
     levels: Vec<Level>,
     refinements: Vec<Refinement>,
 }
@@ -90,11 +107,16 @@ impl FVarChannel {
         let scheme = Scheme::new(scheme_type, channel_options(options));
 
         // Build the value mesh: same faces as the geometry, corners remapped
-        // to value indices.
+        // to value indices, with an index reused at several geometric
+        // vertices split into one value-mesh vertex per vertex.
         let verts_per_face: Vec<usize> = (0..geometry.num_faces())
             .map(|f| geometry.face_vertices(f).len())
             .collect();
-        let mut value_mesh = Level::from_face_vertices(num_values, &verts_per_face, value_indices)?;
+        let (split_indices, base_value_sources) =
+            split_reused_values(geometry, num_values, value_indices);
+        let num_split_values = base_value_sources.as_ref().map_or(num_values, Vec::len);
+        let mut value_mesh =
+            Level::from_face_vertices(num_split_values, &verts_per_face, &split_indices)?;
 
         if !linear {
             // Transfer geometric sharpness onto the value mesh so creases
@@ -134,6 +156,9 @@ impl FVarChannel {
             linear_interpolation: mode,
             scheme,
             linear,
+            num_base_values: num_values,
+            base_face_values: value_indices.to_vec(),
+            base_value_sources,
             levels: vec![value_mesh],
             refinements: Vec::new(),
         })
@@ -174,9 +199,96 @@ impl FVarChannel {
         &self.levels[level]
     }
 
+    /// The number of values at `level` as seen by the channel's user: the
+    /// number of values it was described with at the base level, and the
+    /// value-mesh vertex count above.
+    pub(super) fn num_values(&self, level: usize) -> usize {
+        if level == 0 {
+            self.num_base_values
+        } else {
+            self.levels[level].num_vertices()
+        }
+    }
+
+    /// The values at the corners of `face` at `level`: the caller's indices
+    /// at the base level, value-mesh vertices above.
+    pub(super) fn face_values(&self, level: usize, face: usize) -> &[Index] {
+        if level == 0 {
+            let level0 = &self.levels[0];
+            let start = level0.face_vertices_offset(face);
+            &self.base_face_values[start..start + level0.face_vertices(face).len()]
+        } else {
+            self.levels[level].face_vertices(face)
+        }
+    }
+
+    /// Source values for interpolating from the base level, one per base
+    /// value-mesh vertex: `src` itself when every value is used at a single
+    /// geometric vertex, or `src` gathered through the split.
+    pub(super) fn base_source_values<'a, T: Clone>(&self, src: &'a [T]) -> Cow<'a, [T]> {
+        assert!(
+            src.len() >= self.num_base_values,
+            "src buffer too small: {} values, expected at least {}",
+            src.len(),
+            self.num_base_values
+        );
+        match &self.base_value_sources {
+            None => Cow::Borrowed(src),
+            Some(sources) => Cow::Owned(sources.iter().map(|&v| src[v as usize].clone()).collect()),
+        }
+    }
+
     pub(super) fn refinement(&self, level: usize) -> &Refinement {
         &self.refinements[level - 1]
     }
+}
+
+/// Split value indices reused at several geometric vertices into one value
+/// per (vertex, index) pair. Returns the per-corner indices of the split
+/// values and, when any index had to be split, the caller's index of each
+/// split value. The first vertex using an index keeps that index, so that
+/// the split is the identity whenever no index is reused.
+fn split_reused_values(
+    geometry: &Level,
+    num_values: usize,
+    value_indices: &[Index],
+) -> (Vec<Index>, Option<Vec<Index>>) {
+    // Geometric vertex at which each value was first seen.
+    let mut first_vertex: Vec<Option<Index>> = vec![None; num_values];
+    // Extra (value, split id) pairs of each geometric vertex.
+    let mut extra_at_vertex: Vec<Vec<(Index, Index)>> = vec![Vec::new(); geometry.num_vertices()];
+    let mut sources: Vec<Index> = (0..num_values as Index).collect();
+
+    let mut split = Vec::with_capacity(value_indices.len());
+    let mut corner = 0;
+    for f in 0..geometry.num_faces() {
+        for &v in geometry.face_vertices(f) {
+            let val = value_indices[corner];
+            corner += 1;
+            let id = match first_vertex[val as usize] {
+                None => {
+                    first_vertex[val as usize] = Some(v);
+                    val
+                }
+                Some(first) if first == v => val,
+                Some(_) => {
+                    let extra = &mut extra_at_vertex[v as usize];
+                    match extra.iter().find(|(existing, _)| *existing == val) {
+                        Some(&(_, id)) => id,
+                        None => {
+                            let id = sources.len() as Index;
+                            sources.push(val);
+                            extra.push((val, id));
+                            id
+                        }
+                    }
+                }
+            };
+            split.push(id);
+        }
+    }
+    let sources = (sources.len() > num_values).then_some(sources);
+    (split, sources)
 }
 
 /// The value-mesh boundary interpolation implied by each fvar

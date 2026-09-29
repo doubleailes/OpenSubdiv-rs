@@ -342,6 +342,13 @@ impl Level {
         )
     }
 
+    /// The offset of the first corner of `face` in the level's
+    /// face-vertex array (the corners of face `f` occupy
+    /// `face_vertices_offset(f)..face_vertices_offset(f + 1)`).
+    pub fn face_vertices_offset(&self, face: usize) -> usize {
+        self.face_vert_offsets[face] as usize
+    }
+
     /// The vertices of `face`, in winding order.
     pub fn face_vertices(&self, face: usize) -> &[Index] {
         let (s, e) = self.face_vert_range(face);
