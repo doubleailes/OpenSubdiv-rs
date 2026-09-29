@@ -354,3 +354,199 @@ fn fvar_channel_validation() {
         })
     ));
 }
+
+/// UV layout of the L-shaped island used by the concave-corner tests: faces
+/// F0, F1 and F2 share one island (values 0-7, matching vertex ids), while F3
+/// is an island of its own (values 8-11). Value 4 at the center vertex thus
+/// spans three faces — a reflex (concave) corner of the L — while value 8
+/// spans F3 alone.
+const L_ISLAND_UV_INDICES: [u32; 16] = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 8, 9, 10, 11];
+
+fn l_island_uvs() -> Vec<UV> {
+    vec![
+        [0.0, 0.0],
+        [0.5, 0.0],
+        [1.0, 0.0],
+        [0.0, 0.5],
+        [0.5, 0.5],
+        [1.0, 0.4],
+        [0.0, 1.0],
+        [0.6, 1.0],
+        [0.5, 0.5],
+        [1.0, 0.5],
+        [1.0, 1.0],
+        [0.5, 1.0],
+    ]
+}
+
+#[test]
+fn corners_plus2_pins_concave_corners() {
+    let uvs = l_island_uvs();
+
+    // The value mesh has 14 edges, so value children start at 4 + 14 = 18.
+    let child_of_4 = 18 + 4;
+
+    // CornersPlus1: value 4 is a smooth boundary value of the island; it
+    // creases along the island boundary, between values 5 and 7.
+    let refiner = grid_refiner(
+        &L_ISLAND_UV_INDICES,
+        12,
+        sdc::FVarLinearInterpolation::CornersPlus1,
+    );
+    assert_eq!(refiner.level(1).num_fvar_values(0), 4 + 14 + 12);
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut dst = vec![[0.0f32; 2]; refiner.level(1).num_fvar_values(0)];
+    primvar.interpolate_face_varying(1, 0, &uvs, &mut dst);
+    assert_close2(
+        dst[child_of_4],
+        [
+            0.75 * 0.5 + 0.125 * (1.0 + 0.6),
+            0.75 * 0.5 + 0.125 * (0.4 + 1.0),
+        ],
+    );
+
+    // CornersPlus2: value 8 is a corner of its island, so the concave value
+    // 4 on the other side of the seam is pinned at its authored position.
+    let refiner = grid_refiner(
+        &L_ISLAND_UV_INDICES,
+        12,
+        sdc::FVarLinearInterpolation::CornersPlus2,
+    );
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut dst = vec![[0.0f32; 2]; refiner.level(1).num_fvar_values(0)];
+    primvar.interpolate_face_varying(1, 0, &uvs, &mut dst);
+    assert_close2(dst[child_of_4], uvs[4]);
+}
+
+/// Per-face corner UVs of the L-shaped island refined once under
+/// `CornersPlus2`, as computed by OpenSubdiv 3.7
+/// (`Far::PrimvarRefiner::InterpolateFaceVarying`).
+const L_ISLAND_PLUS2_REFINED: [[UV; 4]; 16] = [
+    [[0.0, 0.0], [0.25, 0.0], [0.25, 0.25], [0.0, 0.25]],
+    [[0.25, 0.0], [0.5, 0.0], [0.5, 0.24375], [0.25, 0.25]],
+    [[0.25, 0.25], [0.5, 0.24375], [0.5, 0.5], [0.25625, 0.5]],
+    [[0.0, 0.25], [0.25, 0.25], [0.25625, 0.5], [0.0, 0.5]],
+    [[0.5, 0.0], [0.75, 0.0], [0.75, 0.225], [0.5, 0.24375]],
+    [[0.75, 0.0], [1.0, 0.0], [1.0, 0.2], [0.75, 0.225]],
+    [[0.75, 0.225], [1.0, 0.2], [1.0, 0.4], [0.75, 0.45]],
+    [[0.5, 0.24375], [0.75, 0.225], [0.75, 0.45], [0.5, 0.5]],
+    [[0.0, 0.5], [0.25625, 0.5], [0.275, 0.75], [0.0, 0.75]],
+    [[0.25625, 0.5], [0.5, 0.5], [0.55, 0.75], [0.275, 0.75]],
+    [[0.275, 0.75], [0.55, 0.75], [0.6, 1.0], [0.3, 1.0]],
+    [[0.0, 0.75], [0.275, 0.75], [0.3, 1.0], [0.0, 1.0]],
+    [[0.5, 0.5], [0.75, 0.5], [0.75, 0.75], [0.5, 0.75]],
+    [[0.75, 0.5], [1.0, 0.5], [1.0, 0.75], [0.75, 0.75]],
+    [[0.75, 0.75], [1.0, 0.75], [1.0, 1.0], [0.75, 1.0]],
+    [[0.5, 0.75], [0.75, 0.75], [0.75, 1.0], [0.5, 1.0]],
+];
+
+/// Limit values of the same level-1 corners, as computed by OpenSubdiv 3.7
+/// (`Far::PrimvarRefiner::LimitFaceVarying`, printed to six decimals).
+const L_ISLAND_PLUS2_LIMIT: [[UV; 4]; 16] = [
+    [[0.0, 0.0], [0.25, 0.0], [0.250694, 0.249306], [0.0, 0.25]],
+    [
+        [0.25, 0.0],
+        [0.5, 0.0],
+        [0.500174, 0.243056],
+        [0.250694, 0.249306],
+    ],
+    [
+        [0.250694, 0.249306],
+        [0.500174, 0.243056],
+        [0.5, 0.5],
+        [0.256944, 0.499826],
+    ],
+    [
+        [0.0, 0.25],
+        [0.250694, 0.249306],
+        [0.256944, 0.499826],
+        [0.0, 0.5],
+    ],
+    [
+        [0.5, 0.0],
+        [0.75, 0.0],
+        [0.75, 0.224306],
+        [0.500174, 0.243056],
+    ],
+    [[0.75, 0.0], [1.0, 0.0], [1.0, 0.2], [0.75, 0.224306]],
+    [[0.75, 0.224306], [1.0, 0.2], [1.0, 0.4], [0.75, 0.45]],
+    [
+        [0.500174, 0.243056],
+        [0.75, 0.224306],
+        [0.75, 0.45],
+        [0.5, 0.5],
+    ],
+    [
+        [0.0, 0.5],
+        [0.256944, 0.499826],
+        [0.275694, 0.75],
+        [0.0, 0.75],
+    ],
+    [
+        [0.256944, 0.499826],
+        [0.5, 0.5],
+        [0.55, 0.75],
+        [0.275694, 0.75],
+    ],
+    [[0.275694, 0.75], [0.55, 0.75], [0.6, 1.0], [0.3, 1.0]],
+    [[0.0, 0.75], [0.275694, 0.75], [0.3, 1.0], [0.0, 1.0]],
+    [[0.5, 0.5], [0.75, 0.5], [0.75, 0.75], [0.5, 0.75]],
+    [[0.75, 0.5], [1.0, 0.5], [1.0, 0.75], [0.75, 0.75]],
+    [[0.75, 0.75], [1.0, 0.75], [1.0, 1.0], [0.75, 1.0]],
+    [[0.5, 0.75], [0.75, 0.75], [0.75, 1.0], [0.5, 1.0]],
+];
+
+#[test]
+fn corners_plus2_matches_opensubdiv_on_concave_island() {
+    let uvs = l_island_uvs();
+    let refiner = grid_refiner(
+        &L_ISLAND_UV_INDICES,
+        12,
+        sdc::FVarLinearInterpolation::CornersPlus2,
+    );
+    let level1 = refiner.level(1);
+    assert_eq!(level1.num_faces(), 16);
+    assert_eq!(level1.num_fvar_values(0), 30);
+
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut refined = vec![[0.0f32; 2]; level1.num_fvar_values(0)];
+    primvar.interpolate_face_varying(1, 0, &uvs, &mut refined);
+    let mut limit = vec![[0.0f32; 2]; level1.num_fvar_values(0)];
+    primvar.limit_face_varying(0, &refined, &mut limit);
+
+    let assert_golden = |actual: UV, expected: UV, what: &str, f: usize, c: usize| {
+        for (a, e) in actual.iter().zip(&expected) {
+            assert!(
+                (a - e).abs() < 1e-5,
+                "{what}: face {f} corner {c}: expected {expected:?}, got {actual:?}"
+            );
+        }
+    };
+    // Child face `f` is child `f % 4` of base face `f / 4`, at that corner.
+    // This port lists a child quad's corners as [corner, leading edge,
+    // center, trailing edge], whereas OpenSubdiv keeps the parent corner at
+    // the same local index `f % 4` (`QuadRefinement::
+    // populateFaceVerticesFromParentFaces`): corner `c` here is corner
+    // `(c + f % 4) % 4` of the same face in OpenSubdiv's tables.
+    for f in 0..16 {
+        let values = level1.face_fvar_values(f, 0);
+        assert_eq!(values.len(), 4);
+        for (c, &val) in values.iter().enumerate() {
+            let osd_c = (c + f % 4) % 4;
+            assert_golden(
+                refined[val as usize],
+                L_ISLAND_PLUS2_REFINED[f][osd_c],
+                "refined",
+                f,
+                c,
+            );
+            assert_golden(
+                limit[val as usize],
+                L_ISLAND_PLUS2_LIMIT[f][osd_c],
+                "limit",
+                f,
+                c,
+            );
+        }
+    }
+}

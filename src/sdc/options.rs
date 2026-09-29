@@ -21,8 +21,12 @@ pub enum VtxBoundaryInterpolation {
 /// Face-varying linear-interpolation rules
 /// (`Sdc::Options::FVarLinearInterpolation`).
 ///
-/// Face-varying refinement is not yet implemented in this port; the enum is
-/// provided for API completeness and forward compatibility.
+/// These rules govern how face-varying channels (see
+/// [`FVarChannelDescriptor`](crate::far::FVarChannelDescriptor)) are refined
+/// and limited by
+/// [`PrimvarRefiner::interpolate_face_varying`](crate::far::PrimvarRefiner::interpolate_face_varying)
+/// and
+/// [`PrimvarRefiner::limit_face_varying`](crate::far::PrimvarRefiner::limit_face_varying).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FVarLinearInterpolation {
     /// Smooth everywhere the mesh is smooth.
