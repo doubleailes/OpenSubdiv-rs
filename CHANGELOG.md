@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-29
+
 ### Fixed
 
 - `FVarLinearInterpolation::CornersPlus2` now sharpens concave corners as
@@ -57,5 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish-on-tag release workflow.
 - This changelog.
 
-[Unreleased]: https://github.com/doubleailes/OpenSubdiv-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/doubleailes/OpenSubdiv-rs/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/doubleailes/OpenSubdiv-rs/compare/v0.1.3...v0.1.4
 [0.1.0]: https://github.com/doubleailes/OpenSubdiv-rs/releases/tag/v0.1.0
