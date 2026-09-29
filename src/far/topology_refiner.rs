@@ -144,18 +144,14 @@ impl<'a> TopologyLevel<'a> {
     /// The number of face-varying values of `channel` at this level
     /// (`GetNumFVarValues`).
     pub fn num_fvar_values(&self, channel: usize) -> usize {
-        self.fvar_channels[channel]
-            .level(self.level_index)
-            .num_vertices()
+        self.fvar_channels[channel].num_values(self.level_index)
     }
 
     /// The face-varying values associated with the corners of `face`, in the
     /// same winding order as [`face_vertices`](Self::face_vertices)
     /// (`GetFaceFVarValues`).
     pub fn face_fvar_values(&self, face: usize, channel: usize) -> &'a [Index] {
-        self.fvar_channels[channel]
-            .level(self.level_index)
-            .face_vertices(face)
+        self.fvar_channels[channel].face_values(self.level_index, face)
     }
 
     pub(super) fn inner(&self) -> &'a Level {

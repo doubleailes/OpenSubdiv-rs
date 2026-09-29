@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned too, so reflex corners of a UV island keep their authored position
   under refinement and at the limit
   ([#5](https://github.com/doubleailes/OpenSubdiv-rs/issues/5)).
+- A face-varying value index reused at several geometric vertices (as in a
+  deduplicated UV buffer) is now one independent value at each of them, as
+  in OpenSubdiv, instead of one shared value-mesh vertex whose sharpness and
+  neighborhood mixed all of its uses. Refined levels report one value per
+  use; the base level still exposes the channel exactly as described.
 - Removed the stale "face-varying refinement is not yet implemented" note
   from the `FVarLinearInterpolation` docs.
 

@@ -7,6 +7,7 @@ use crate::sdc::{
 };
 use crate::vtr::{Level, Refinement};
 use crate::{Index, INDEX_INVALID};
+use std::borrow::Cow;
 
 /// Interface for primvar data interpolated by [`PrimvarRefiner`].
 ///
@@ -125,13 +126,20 @@ impl<'a> PrimvarRefiner<'a> {
             self.refiner.max_level()
         );
         let fvar = self.refiner.fvar_channel(channel);
+        // Base-level values are the caller's; the value mesh may split an
+        // index reused at several vertices into several values.
+        let src = if level == 1 {
+            fvar.base_source_values(src)
+        } else {
+            Cow::Borrowed(src)
+        };
         interpolate_level(
             fvar.scheme(),
             fvar.is_linear(),
             fvar.level(level - 1),
             fvar.level(level),
             fvar.refinement(level),
-            src,
+            &src,
             dst,
         );
     }
@@ -183,11 +191,17 @@ impl<'a> PrimvarRefiner<'a> {
             "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable"
         );
         let fvar = self.refiner.fvar_channel(channel);
+        let max_level = self.refiner.max_level();
+        let src = if max_level == 0 {
+            fvar.base_source_values(src)
+        } else {
+            Cow::Borrowed(src)
+        };
         limit_level(
             fvar.scheme(),
             fvar.is_linear(),
-            fvar.level(self.refiner.max_level()),
-            src,
+            fvar.level(max_level),
+            &src,
             dst,
         );
     }

@@ -550,3 +550,321 @@ fn corners_plus2_matches_opensubdiv_on_concave_island() {
         }
     }
 }
+
+/// A 4x4-vertex grid of nine quads whose bottom-left eight form one UV
+/// island and whose top-right quad (vertices 10, 11, 15, 14) is an island of
+/// its own. The island's values are numbered in vertex order skipping the
+/// vertices 5 and 15, except that the interior vertex 5 *reuses* the value
+/// of vertex 10 — the concave corner of the island — as a deduplicated UV
+/// buffer would. The value index is used at two vertices: as a pinned
+/// concave corner at vertex 10 and as a smooth interior value at vertex 5.
+///
+/// ```text
+///   12 -- 13 -- 14 -- 15
+///   |  6  |  7  |  8  |
+///    8 --- 9 -- 10 -- 11
+///   |  3  |  4  |  5  |
+///    4 --- 5 --- 6 --- 7
+///   |  0  |  1  |  2  |
+///    0 --- 1 --- 2 --- 3
+/// ```
+fn reused_value_grid() -> (Vec<u32>, Vec<u32>, Vec<UV>) {
+    let mut id_of = [u32::MAX; 16];
+    let mut next = 0;
+    for (v, id) in id_of.iter_mut().enumerate() {
+        if v != 5 && v != 15 {
+            *id = next;
+            next += 1;
+        }
+    }
+    id_of[5] = id_of[10];
+
+    let mut face_verts = Vec::with_capacity(36);
+    let mut uv_indices = Vec::with_capacity(36);
+    for y in 0..3u32 {
+        for x in 0..3u32 {
+            let q = y * 3 + x;
+            let v0 = y * 4 + x;
+            let corners = [v0, v0 + 1, v0 + 5, v0 + 4];
+            face_verts.extend_from_slice(&corners);
+            for (i, &c) in corners.iter().enumerate() {
+                uv_indices.push(if q == 8 {
+                    14 + i as u32
+                } else {
+                    id_of[c as usize]
+                });
+            }
+        }
+    }
+
+    let mut uvs = vec![[0.0f32; 2]; 18];
+    for v in 0..16 {
+        if v != 5 && v != 15 {
+            uvs[id_of[v] as usize] = [(v % 4) as f32 / 3.0, (v / 4) as f32 / 3.0];
+        }
+    }
+    uvs[14] = [0.7, 0.7];
+    uvs[15] = [1.0, 0.7];
+    uvs[16] = [1.0, 1.0];
+    uvs[17] = [0.7, 1.0];
+    (face_verts, uv_indices, uvs)
+}
+
+/// Per-face corner UVs of the reused-value grid refined once under
+/// `CornersPlus2`, as computed by OpenSubdiv 3.7
+/// (`Far::PrimvarRefiner::InterpolateFaceVarying`).
+const REUSED_VALUE_PLUS2_REFINED: [[UV; 4]; 36] = [
+    [[0.0, 0.0], [0.166667, 0.0], [0.25, 0.25], [0.0, 0.166667]],
+    [
+        [0.166667, 0.0],
+        [0.333333, 0.0],
+        [0.458333, 0.291667],
+        [0.25, 0.25],
+    ],
+    [
+        [0.25, 0.25],
+        [0.458333, 0.291667],
+        [0.520833, 0.520833],
+        [0.291667, 0.458333],
+    ],
+    [
+        [0.0, 0.166667],
+        [0.25, 0.25],
+        [0.291667, 0.458333],
+        [0.0, 0.333333],
+    ],
+    [
+        [0.333333, 0.0],
+        [0.5, 0.0],
+        [0.583333, 0.25],
+        [0.458333, 0.291667],
+    ],
+    [
+        [0.5, 0.0],
+        [0.666667, 0.0],
+        [0.6875, 0.1875],
+        [0.583333, 0.25],
+    ],
+    [
+        [0.583333, 0.25],
+        [0.6875, 0.1875],
+        [0.697917, 0.364583],
+        [0.625, 0.458333],
+    ],
+    [
+        [0.458333, 0.291667],
+        [0.583333, 0.25],
+        [0.625, 0.458333],
+        [0.520833, 0.520833],
+    ],
+    [
+        [0.666667, 0.0],
+        [0.833333, 0.0],
+        [0.833333, 0.166667],
+        [0.6875, 0.1875],
+    ],
+    [
+        [0.833333, 0.0],
+        [1.0, 0.0],
+        [1.0, 0.166667],
+        [0.833333, 0.166667],
+    ],
+    [
+        [0.833333, 0.166667],
+        [1.0, 0.166667],
+        [1.0, 0.333333],
+        [0.833333, 0.333333],
+    ],
+    [
+        [0.6875, 0.1875],
+        [0.833333, 0.166667],
+        [0.833333, 0.333333],
+        [0.697917, 0.364583],
+    ],
+    [
+        [0.0, 0.333333],
+        [0.291667, 0.458333],
+        [0.25, 0.583333],
+        [0.0, 0.5],
+    ],
+    [
+        [0.291667, 0.458333],
+        [0.520833, 0.520833],
+        [0.458333, 0.625],
+        [0.25, 0.583333],
+    ],
+    [
+        [0.25, 0.583333],
+        [0.458333, 0.625],
+        [0.364583, 0.697917],
+        [0.1875, 0.6875],
+    ],
+    [
+        [0.0, 0.5],
+        [0.25, 0.583333],
+        [0.1875, 0.6875],
+        [0.0, 0.666667],
+    ],
+    [
+        [0.520833, 0.520833],
+        [0.625, 0.458333],
+        [0.583333, 0.583333],
+        [0.458333, 0.625],
+    ],
+    [
+        [0.625, 0.458333],
+        [0.697917, 0.364583],
+        [0.6875, 0.520833],
+        [0.583333, 0.583333],
+    ],
+    [
+        [0.583333, 0.583333],
+        [0.6875, 0.520833],
+        [0.666667, 0.666667],
+        [0.520833, 0.6875],
+    ],
+    [
+        [0.458333, 0.625],
+        [0.583333, 0.583333],
+        [0.520833, 0.6875],
+        [0.364583, 0.697917],
+    ],
+    [
+        [0.697917, 0.364583],
+        [0.833333, 0.333333],
+        [0.833333, 0.5],
+        [0.6875, 0.520833],
+    ],
+    [
+        [0.833333, 0.333333],
+        [1.0, 0.333333],
+        [1.0, 0.5],
+        [0.833333, 0.5],
+    ],
+    [
+        [0.833333, 0.5],
+        [1.0, 0.5],
+        [1.0, 0.666667],
+        [0.833333, 0.666667],
+    ],
+    [
+        [0.6875, 0.520833],
+        [0.833333, 0.5],
+        [0.833333, 0.666667],
+        [0.666667, 0.666667],
+    ],
+    [
+        [0.0, 0.666667],
+        [0.1875, 0.6875],
+        [0.166667, 0.833333],
+        [0.0, 0.833333],
+    ],
+    [
+        [0.1875, 0.6875],
+        [0.364583, 0.697917],
+        [0.333333, 0.833333],
+        [0.166667, 0.833333],
+    ],
+    [
+        [0.166667, 0.833333],
+        [0.333333, 0.833333],
+        [0.333333, 1.0],
+        [0.166667, 1.0],
+    ],
+    [
+        [0.0, 0.833333],
+        [0.166667, 0.833333],
+        [0.166667, 1.0],
+        [0.0, 1.0],
+    ],
+    [
+        [0.364583, 0.697917],
+        [0.520833, 0.6875],
+        [0.5, 0.833333],
+        [0.333333, 0.833333],
+    ],
+    [
+        [0.520833, 0.6875],
+        [0.666667, 0.666667],
+        [0.666667, 0.833333],
+        [0.5, 0.833333],
+    ],
+    [
+        [0.5, 0.833333],
+        [0.666667, 0.833333],
+        [0.666667, 1.0],
+        [0.5, 1.0],
+    ],
+    [
+        [0.333333, 0.833333],
+        [0.5, 0.833333],
+        [0.5, 1.0],
+        [0.333333, 1.0],
+    ],
+    [[0.7, 0.7], [0.85, 0.7], [0.85, 0.85], [0.7, 0.85]],
+    [[0.85, 0.7], [1.0, 0.7], [1.0, 0.85], [0.85, 0.85]],
+    [[0.85, 0.85], [1.0, 0.85], [1.0, 1.0], [0.85, 1.0]],
+    [[0.7, 0.85], [0.85, 0.85], [0.85, 1.0], [0.7, 1.0]],
+];
+
+#[test]
+fn reused_value_index_is_independent_at_each_vertex() {
+    let (face_verts, uv_indices, uvs) = reused_value_grid();
+    let verts_per_face = [4usize; 9];
+    let channels = [FVarChannelDescriptor::new(18, &uv_indices)];
+    let descriptor =
+        TopologyDescriptor::new(16, &verts_per_face, &face_verts).with_fvar_channels(&channels);
+    let options = sdc::Options::default()
+        .with_fvar_linear_interpolation(sdc::FVarLinearInterpolation::CornersPlus2);
+    let mut refiner =
+        TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
+    refiner.refine_uniform(UniformOptions::new(2));
+
+    // The base level exposes the channel exactly as described.
+    let level0 = refiner.level(0);
+    assert_eq!(level0.num_fvar_values(0), 18);
+    for f in 0..9 {
+        assert_eq!(level0.face_fvar_values(f, 0), &uv_indices[f * 4..f * 4 + 4]);
+    }
+
+    // Refined levels count the reused index once per vertex it is used at,
+    // as OpenSubdiv does (54 and 178 values).
+    let level1 = refiner.level(1);
+    assert_eq!(level1.num_fvar_values(0), 54);
+    assert_eq!(refiner.level(2).num_fvar_values(0), 178);
+
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut refined = vec![[0.0f32; 2]; 54];
+    primvar.interpolate_face_varying(1, 0, &uvs, &mut refined);
+
+    // Same child-corner rotation as `corners_plus2_matches_opensubdiv_on_concave_island`.
+    for f in 0..36 {
+        let values = level1.face_fvar_values(f, 0);
+        for (c, &val) in values.iter().enumerate() {
+            let expected = REUSED_VALUE_PLUS2_REFINED[f][(c + f % 4) % 4];
+            let actual = refined[val as usize];
+            for (a, e) in actual.iter().zip(&expected) {
+                assert!(
+                    (a - e).abs() < 1e-5,
+                    "face {f} corner {c}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+    }
+
+    // The two occurrences of the shared index refine differently: pinned at
+    // the concave corner (vertex 10 is corner 2 of quad 4, so its child
+    // value is corner 0 of child face 4 * 4 + 2), smoothed at the interior
+    // vertex 5 (corner 2 of quad 0: corner 0 of child face 2).
+    let pinned = refined[level1.face_fvar_values(18, 0)[0] as usize];
+    let smoothed = refined[level1.face_fvar_values(2, 0)[0] as usize];
+    assert_close2(pinned, uvs[9]);
+    assert!((smoothed[0] - uvs[9][0]).abs() > 0.1);
+
+    // Level 2 interpolates from the split level-1 values without any gather.
+    let mut refined2 = vec![[0.0f32; 2]; 178];
+    primvar.interpolate_face_varying(2, 0, &refined, &mut refined2);
+    let level2 = refiner.level(2);
+    let pinned2 = refined2[level2.face_fvar_values(18 * 4, 0)[0] as usize];
+    assert_close2(pinned2, uvs[9]);
+}
