@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `FVarLinearInterpolation::CornersPlus2` now sharpens concave corners as
+  OpenSubdiv does: where exactly two face-varying values meet at a vertex
+  and one of them is a corner (spans a single face), the other value is
+  pinned too, so reflex corners of a UV island keep their authored position
+  under refinement and at the limit
+  ([#5](https://github.com/doubleailes/OpenSubdiv-rs/issues/5)).
+- Removed the stale "face-varying refinement is not yet implemented" note
+  from the `FVarLinearInterpolation` docs.
+
 ## [0.1.0] - 2026-08-06
 
 ### Added

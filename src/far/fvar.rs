@@ -28,8 +28,9 @@
 //! * `CornersPlus1` — additionally pins all values at vertices where three
 //!   or more distinct values meet ("junctions").
 //! * `CornersPlus2` — additionally pins values at fvar darts (an interior
-//!   vertex where a seam terminates). OpenSubdiv's additional
-//!   concave-corner sharpening is not yet implemented.
+//!   vertex where a seam terminates) and at concave corners: where exactly
+//!   two values meet and one of them is a corner (spans a single face), the
+//!   other spans the remaining faces around the vertex and is pinned too.
 //! * `Boundaries` — every boundary/seam value is pinned, making all fvar
 //!   boundaries piecewise linear.
 //!
@@ -198,15 +199,18 @@ fn apply_mode_sharpening(mode: FVarLinearInterpolation, geometry: &Level, value_
         | FVarLinearInterpolation::None
         | FVarLinearInterpolation::CornersOnly => {}
         FVarLinearInterpolation::CornersPlus1 | FVarLinearInterpolation::CornersPlus2 => {
-            // Distinct values meeting at each geometric vertex.
-            let mut values_at_vertex: Vec<Vec<Index>> = vec![Vec::new(); geometry.num_vertices()];
+            // Distinct values meeting at each geometric vertex, with the
+            // number of incident faces each value spans there.
+            let mut values_at_vertex: Vec<Vec<(Index, usize)>> =
+                vec![Vec::new(); geometry.num_vertices()];
             for f in 0..geometry.num_faces() {
                 let gv = geometry.face_vertices(f);
                 let fv = value_mesh.face_vertices(f);
                 for (&v, &val) in gv.iter().zip(fv) {
                     let vals = &mut values_at_vertex[v as usize];
-                    if !vals.contains(&val) {
-                        vals.push(val);
+                    match vals.iter_mut().find(|(existing, _)| *existing == val) {
+                        Some((_, span)) => *span += 1,
+                        None => vals.push((val, 1)),
                     }
                 }
             }
@@ -219,9 +223,18 @@ fn apply_mode_sharpening(mode: FVarLinearInterpolation, geometry: &Level, value_
                 let dart = mode == FVarLinearInterpolation::CornersPlus2
                     && vals.len() == 1
                     && !geometry.is_vertex_boundary(v)
-                    && value_mesh.is_vertex_boundary(vals[0] as usize);
-                if junction || dart {
-                    for &val in vals {
+                    && value_mesh.is_vertex_boundary(vals[0].0 as usize);
+                // Concave corners (`CornersPlus2` only): exactly two values
+                // meet and one of them is a corner (spans a single face), so
+                // the other spans all remaining faces around the vertex — a
+                // reflex corner of its UV island. OpenSubdiv sharpens both
+                // (`sharpenBothIfOneCorner` in `FVarLevel`); the corner is
+                // already pinned, so this pins the concave value.
+                let concave = mode == FVarLinearInterpolation::CornersPlus2
+                    && vals.len() == 2
+                    && (vals[0].1 == 1 || vals[1].1 == 1);
+                if junction || dart || concave {
+                    for &(val, _) in vals {
                         value_mesh.set_vertex_sharpness(val as usize, sdc::SHARPNESS_INFINITE);
                     }
                 }
