@@ -286,7 +286,7 @@ fn crease_ends_and_varying_sharpness_are_isolated() {
         assert_eq!(base.len(), 4);
         for &p in &base {
             assert_eq!(table.single_crease_sharpness(p), 2.0);
-            let row = table.patch_face(p) as u32 / 8;
+            let row = table.patch_face(p) / 8;
             assert!(row == 3 || row == 4);
         }
 
