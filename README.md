@@ -177,7 +177,7 @@ patch on regular interior, boundary, pinned-corner and crease neighborhoods
 (for arbitrary control data), pinning every coefficient. As in OpenSubdiv,
 non-manifold edges are made infinitely sharp, and non-manifold vertices
 infinitely sharp unless they lie on a crease of exactly two non-manifold
-edges, so non-manifold neighborhoods refine and patch like sharp features.
+edges bounding every fan around them, so non-manifold neighborhoods refine and patch like sharp features.
 Only unsharpened (`VtxBoundaryInterpolation::None`) boundaries fall back to
 bilinear quads of the refined level; semi-sharp features that
 are still unresolved at the isolation cap are capped as if smooth, as
