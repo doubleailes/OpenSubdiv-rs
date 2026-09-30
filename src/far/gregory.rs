@@ -42,7 +42,11 @@
 //! * a **smooth corner** of a single face — the crease limit rules of its
 //!   two boundary edges.
 //!
-//! Only non-manifold neighborhoods are left to the bilinear fallback of
+//! Semi-sharp creases still unresolved at the isolation level are ignored
+//! (their vertices are treated as smooth, or as darts), as OpenSubdiv does.
+//! Only non-manifold neighborhoods and unsharpened boundaries
+//! (`VtxBoundaryInterpolation::None`, whose smooth boundary rules have no
+//! Gregory counterpart) are left to the bilinear fallback of
 //! [`super::PatchTableFactory`].
 
 use crate::sdc::{self, Crease, Rule};
@@ -263,8 +267,17 @@ pub(super) fn corner_span(
             return None;
         }
     }
-    if periodic && faces.len() != num_faces {
-        return None; // disconnected fans around a non-manifold vertex
+    // The vertex's faces must form a single fan: a second fan sharing only
+    // the vertex (a non-manifold "bow tie") passes the counts above but is
+    // never reached by the walk. A span cut short by crease edges is
+    // checked against the walk that ignores them.
+    let connected = if periodic || !inf_sharp_singular {
+        faces.len() == num_faces
+    } else {
+        corner_span(level, face as usize, corner, false).is_some()
+    };
+    if !connected {
+        return None;
     }
     let face_in_span = faces.iter().position(|&f| f == face)?;
     Some(CornerSpan {
@@ -463,24 +476,43 @@ pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryPoints>> {
         let next = fv[(k + 1) % 4];
         let prev = fv[(k + 3) % 4];
 
+        // Only infinitely sharp features shape the cap: semi-sharp creases
+        // still unresolved at the isolation level decay to smooth, so their
+        // vertices are treated as smooth (or as darts) here rather than as
+        // creases or corners that would pin the cap to a moving vertex.
         let vertex_sharpness = level.vertex_sharpness(v as usize);
         let inf_vertex = Crease::is_infinite(vertex_sharpness);
-        let (mut sharp_edges, mut inf_edges) = (0usize, 0usize);
-        for &e in level.vertex_edges(v as usize) {
-            let s = level.edge_sharpness(e as usize);
-            sharp_edges += Crease::is_sharp(s) as usize;
-            inf_edges += Crease::is_infinite(s) as usize;
-        }
+        let inf_edges = level
+            .vertex_edges(v as usize)
+            .iter()
+            .filter(|&&e| Crease::is_infinite(level.edge_sharpness(e as usize)))
+            .count();
+        let inf_rule = vertex_rule(if inf_vertex { vertex_sharpness } else { 0.0 }, inf_edges);
         // Infinitely sharp edges partition the ring — except at a dart,
         // whose single crease leaves the (smooth) limit neighborhood whole.
-        let split_at_inf_sharp =
-            inf_edges > 0 && vertex_rule(vertex_sharpness, sharp_edges) != Rule::Dart;
+        let split_at_inf_sharp = inf_edges > 0 && inf_rule != Rule::Dart;
         let span = corner_span(level, face, k, split_at_inf_sharp)?;
+
+        // A smooth boundary (`VtxBoundaryInterpolation::None`) follows the
+        // smooth vertex rules, not the crease rules of the boundary points
+        // below; such faces keep the bilinear fallback.
+        if span.boundary {
+            let smooth_boundary = |&e: &Index| {
+                level.is_edge_boundary(e as usize)
+                    && !Crease::is_infinite(level.edge_sharpness(e as usize))
+            };
+            if [span.edges[0], span.edges[span.valence() - 1]]
+                .iter()
+                .any(smooth_boundary)
+            {
+                return None;
+            }
+        }
 
         // A sharp corner interpolates its vertex: an infinitely sharp vertex,
         // or a vertex whose infinitely sharp edges do not form a crease.
         let sharp = if split_at_inf_sharp {
-            inf_vertex || inf_edges != 2
+            inf_rule != Rule::Crease
         } else {
             inf_vertex
         };

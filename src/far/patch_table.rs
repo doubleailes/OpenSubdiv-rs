@@ -36,9 +36,10 @@
 //!   crease corners, sharp corners and darts. The 20 derived points give
 //!   corner limit-point interpolation, exact C0 boundaries and approximate
 //!   G1 smoothness, as OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
-//! * [`PatchType::Quads`] — non-manifold neighborhoods (and every face of
-//!   the Bilinear scheme, whose mesh is its own limit surface) fall back to
-//!   bilinear interpolation of the refined face.
+//! * [`PatchType::Quads`] — non-manifold neighborhoods, irregular faces on
+//!   unsharpened boundaries (`VtxBoundaryInterpolation::None`), and every
+//!   face of the Bilinear scheme (whose mesh is its own limit surface) fall
+//!   back to bilinear interpolation of the refined face.
 //!
 //! Control-vertex indices refer to the **concatenation of every level's
 //! vertices**, base level first: evaluate patches against the base values
@@ -483,7 +484,8 @@ impl PatchTableFactory {
                         }
                         PatchKind::Gregory(points)
                     } else {
-                        // Non-manifold neighborhood: bilinear fallback.
+                        // Non-manifold neighborhood or unsharpened boundary:
+                        // bilinear fallback.
                         PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                     }
                 } else {

@@ -564,3 +564,146 @@ fn fully_creased_cube_corner_is_a_regular_corner_patch() {
         1e-5,
     );
 }
+
+#[test]
+fn unresolved_semi_sharp_crease_does_not_pin_the_cap() {
+    // A grid vertex with one infinitely sharp edge and one semi-sharp edge
+    // that has not decayed at a shallow isolation level: only infinitely
+    // sharp features shape the cap, so the vertex is a dart — its cap
+    // corner is the smooth limit of its neighborhood, not the vertex
+    // itself, which the limit surface never reaches.
+    let mut verts_per_face = Vec::new();
+    let mut face_verts: Vec<u32> = Vec::new();
+    for j in 0..4u32 {
+        for i in 0..4u32 {
+            verts_per_face.push(4usize);
+            let v = j * 5 + i;
+            face_verts.extend_from_slice(&[v, v + 1, v + 6, v + 5]);
+        }
+    }
+    let creases = [[12u32, 13u32], [12, 7]];
+    let weights = [sdc::SHARPNESS_INFINITE, 2.5];
+    let options = sdc::Options::default()
+        .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::EdgeAndCorner);
+    let descriptor =
+        TopologyDescriptor::new(25, &verts_per_face, &face_verts).with_creases(&creases, &weights);
+    let mut positions = Vec::new();
+    for j in 0..5 {
+        for i in 0..5 {
+            positions.push([i as f32, j as f32, 0.0]);
+        }
+    }
+    positions[12][2] = 1.0; // the creased vertex stands out of the plane
+
+    let surface = Surface::adaptive(descriptor, options, 1, &positions);
+    assert_eq!(surface.refiner.max_level(), 1);
+    // Vertex 12 is corner 2 of face 5 (ptex 5, uv (1,1)).
+    let map = PatchMap::new(&surface.table);
+    let patch = map.find_patch(5, 1.0, 1.0).unwrap();
+    assert_eq!(surface.table.patch_type(patch), PatchType::GregoryBasis);
+    let corner = surface.evaluate(patch, 1.0, 1.0);
+
+    // Deep uniform refinement approaches the true limit of the vertex. The
+    // cap cannot be exact there — the crease still shapes two more levels
+    // of refinement — but it must be much closer to the limit than the
+    // vertex it would otherwise be pinned to.
+    let truth = Surface::uniform(descriptor, options, 6, &positions);
+    let tp = PatchMap::new(&truth.table).find_patch(5, 1.0, 1.0).unwrap();
+    let limit = truth.evaluate(tp, 1.0, 1.0);
+    let pinned_error = distance(positions[12], limit);
+    let cap_error = distance(corner, limit);
+    assert!(pinned_error > 0.3, "{limit:?}");
+    assert!(
+        cap_error < 0.35 * pinned_error,
+        "cap {corner:?} vs limit {limit:?} (pinned error {pinned_error})"
+    );
+}
+
+#[test]
+fn smooth_boundaries_keep_the_bilinear_fallback() {
+    // With `VtxBoundaryInterpolation::None` boundary edges stay smooth and
+    // follow rules the Gregory construction does not model: faces on such
+    // boundaries stay bilinear at the cap, while the interior extraordinary
+    // vertex is still capped with Gregory patches.
+    let (verts_per_face, face_verts, positions) = fan();
+    let descriptor = TopologyDescriptor::new(11, &verts_per_face, &face_verts);
+    let options = sdc::Options::default()
+        .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::None);
+
+    let surface = Surface::adaptive(descriptor, options, 2, &positions);
+    assert_eq!(count(&surface.table, PatchType::GregoryBasis), 5);
+    assert!(count(&surface.table, PatchType::Quads) > 0);
+    let level = surface.refiner.level(2);
+    for p in 0..surface.table.num_patches() {
+        let face = surface.table.patch_face(p) as usize;
+        let depth = surface.table.patch_param(p).depth as usize;
+        let on_boundary = surface
+            .refiner
+            .level(depth)
+            .face_vertices(face)
+            .iter()
+            .any(|&v| surface.refiner.level(depth).is_vertex_boundary(v as usize));
+        match surface.table.patch_type(p) {
+            PatchType::Quads => assert!(on_boundary && depth == 2),
+            PatchType::GregoryBasis => {
+                assert!(!on_boundary);
+                assert!(level
+                    .face_vertices(face)
+                    .iter()
+                    .any(|&v| level.vertex_edges(v as usize).len() == 5));
+            }
+            PatchType::Regular => assert!(!on_boundary),
+        }
+    }
+}
+
+#[test]
+fn bow_tie_vertex_falls_back_consistently() {
+    // A closed fan of four quads and an open fan of two quads sharing only
+    // one vertex: the vertex is non-manifold, so every face at it must take
+    // the same (bilinear) fallback rather than mixing Gregory caps on one
+    // fan with bilinear quads on the other.
+    let verts_per_face = [4usize; 6];
+    let face_verts: [u32; 24] = [
+        0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7, // 2x2 grid around vertex 4
+        4, 9, 10, 11, 4, 11, 12, 13, // open fan hanging off vertex 4
+    ];
+    let mut positions: Vec<P3> = (0..9)
+        .map(|k| [(k % 3) as f32, (k / 3) as f32, 0.0])
+        .collect();
+    positions.extend_from_slice(&[
+        [1.5, 1.0, 1.0],
+        [1.5, 1.5, 2.0],
+        [1.0, 1.5, 1.0],
+        [0.5, 1.5, 2.0],
+        [0.5, 1.0, 1.0],
+    ]);
+    let descriptor = TopologyDescriptor::new(14, &verts_per_face, &face_verts);
+    let surface = Surface::adaptive(descriptor, sdc::Options::default(), 2, &positions);
+
+    let level = surface.refiner.level(2);
+    let child = |v: u32| -> u32 {
+        let c1 = surface
+            .refiner
+            .refinement(1)
+            .vertex_child_vertex(v as usize);
+        surface
+            .refiner
+            .refinement(2)
+            .vertex_child_vertex(c1 as usize)
+    };
+    let shared = child(4);
+    assert_eq!(level.vertex_faces(shared as usize).len(), 6);
+    let mut at_shared = 0;
+    for p in 0..surface.table.num_patches() {
+        if surface.table.patch_param(p).depth != 2 {
+            continue;
+        }
+        let face = surface.table.patch_face(p) as usize;
+        if level.face_vertices(face).contains(&shared) {
+            assert_eq!(surface.table.patch_type(p), PatchType::Quads);
+            at_shared += 1;
+        }
+    }
+    assert_eq!(at_shared, 6);
+}

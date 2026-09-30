@@ -135,7 +135,8 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   is capped with a **Gregory patch** (as OpenSubdiv's
   `ENDCAP_GREGORY_BASIS`), interpolating the corner limit points with C0
   boundaries and approximate G1 smoothness; only non-manifold neighborhoods
-  fall back to bilinear quads
+  and unsharpened (`VtxBoundaryInterpolation::None`) boundaries fall back to
+  bilinear quads
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -172,9 +173,10 @@ smooth interior, smooth boundary/crease, sharp and dart corners. The test
 suite verifies that the construction degenerates to the exact B-spline
 patch on regular interior, boundary, pinned-corner and crease neighborhoods
 (for arbitrary control data), pinning every coefficient. Only non-manifold
-neighborhoods fall back to bilinear quads of the refined level; semi-sharp
-features that are still unresolved at the isolation cap are capped as if
-smooth, as OpenSubdiv does.
+neighborhoods and unsharpened (`VtxBoundaryInterpolation::None`) boundaries
+fall back to bilinear quads of the refined level; semi-sharp features that
+are still unresolved at the isolation cap are capped as if smooth, as
+OpenSubdiv does.
 
 Feature-adaptive refinement follows OpenSubdiv's approach: faces needing
 isolation are selected level by level with their one-ring support included
