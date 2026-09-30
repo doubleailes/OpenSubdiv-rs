@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Patches and feature-adaptive refinement for the Loop scheme
+  ([#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12)).
+  `PatchTableFactory::create` now builds patch tables for Loop refiners:
+  regular triangles — interior valence-6 corners, regular boundary and
+  infinitely sharp crease vertices, and pinned corners — become exact
+  quartic box-spline patches on 12 control vertices (`PatchType::Loop`),
+  every other face at its isolation level a Gregory triangle end cap on 18
+  derived points (`PatchType::GregoryTriangle`, OpenSubdiv's
+  `GREGORY_TRIANGLE`), and faces on unsharpened boundaries linear
+  triangles (`PatchType::Triangles`). `TopologyRefiner::refine_adaptive`
+  isolates Loop's irregular features exactly as it does for Catmark, with
+  sparse levels; `PatchParam` carries a triangle's parametric sub-domain
+  (`PatchParam::is_triangle_rotated` for the inverted central children),
+  `PatchMap::find_patch` locates triangles by ptex face and `(u, v)`, and
+  `PtexIndices` maps every triangular base face to one ptex face.
+- `vtr::Refinement::refine_selected` supports sparse triangular splits.
 - Single-crease patches for semi-sharp creases (OpenSubdiv's
   `useSingleCreasePatch`), enabled with
   `AdaptiveOptions::with_single_crease_patch(true)`
@@ -30,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The four children of a triangle under Loop refinement are now ordered
+  and oriented as OpenSubdiv's `TriRefinement` orders them — the corner
+  children `(v0, e0, e2)`, `(e0, v1, e1)`, `(e2, e1, v2)` keeping the
+  parent's orientation and the central child `(e1, e2, e0)` inverted —
+  instead of `(v_i, e_i, e_{i-1})` corner children; the face-vertex order
+  of refined Loop levels changes accordingly (vertex numbering does not).
 - `AdaptiveOptions` gained the public field `use_single_crease_patch`
   (default `false`); code building it with a struct literal must set it or
   use `AdaptiveOptions::new`.
@@ -40,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`applyComponentTagsAndBoundarySharpness`). This changes refinement and
   limit positions around non-manifold features, which previously followed
   the smooth rules.
+
+### Removed
+
+- `TopologyError::LoopPatchesNotSupported`: Loop patch tables are now
+  supported, so the variant no longer had a use.
 
 ## [0.2.0] - 2026-09-30
 

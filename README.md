@@ -21,7 +21,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 | Module | OpenSubdiv layer | Contents |
 |--------|------------------|----------|
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
-| `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform quad/tri refinement |
+| `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform or sparse quad/tri refinement |
 | `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
 
 ## Installation
@@ -103,7 +103,8 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
 - **Schemes**: Bilinear, Catmull-Clark (arbitrary n-gons), Loop (triangle meshes)
 - **Uniform refinement** to any depth, with full topology (all component
   relations) available at every level
-- **Feature-adaptive refinement** (`refine_adaptive`): only irregular
+- **Feature-adaptive refinement** (`refine_adaptive`), for Catmark and
+  Loop alike: only irregular
   features — extraordinary vertices, non-quads, semi-sharp creases and
   irregular infinitely sharp features — are isolated, together with their
   one-ring support, until they resolve or reach the isolation level. Levels above the base are *sparse*: memory grows with
@@ -142,6 +143,14 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   `ENDCAP_GREGORY_BASIS`), interpolating the corner limit points with C0
   boundaries and approximate G1 smoothness; only unsharpened
   (`VtxBoundaryInterpolation::None`) boundaries fall back to bilinear quads
+- **Loop patches**: for the Loop scheme, regular triangles (interior
+  valence-6 corners, regular boundary and crease vertices, pinned corners)
+  become exact quartic **box-spline** patches on 12 control vertices, and
+  every other face at its isolation level a **Gregory triangle** end cap
+  (as OpenSubdiv's `GREGORY_TRIANGLE`) on 18 derived points; `PatchParam`
+  carries the triangle's parametric sub-domain (including the inverted
+  central children) and `PatchMap` locates triangles by ptex face and
+  `(u, v)`
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -199,17 +208,38 @@ additionally caps the stored sharpness at the remaining isolation levels;
 this port evaluates the authored sharpness exactly instead. Faces where the
 crease ends, turns or changes sharpness are isolated as before.
 
+Loop patches follow the same design on triangles. The quartic box-spline
+basis of a regular face is derived by exact subdivision of the regular
+lattice (Stam's twelve polynomials); boundaries, infinitely sharp creases
+and pinned corners fold their phantom control vertices with the
+parallelogram reflection `a + b − c` across the wall edge (and the point
+reflection `2v − n` through a pinned corner), which reproduces the crease
+subdivision rules exactly, so the boundary curve is the cubic B-spline of
+the boundary vertices as with the limit masks. Gregory triangles interpolate
+the Loop limit points at their corners; their edge points lie a quarter of
+the limit tangent along each edge, their mid-edge points make each edge
+curve interpolate the limit surface at the edge's midpoint (the limit of the
+edge's child vertex), and their face points come from the G1 condition
+between neighboring patches. Adjacent patches share their edge curves, so
+they join with exact C0 continuity; on regular neighborhoods the cap
+degenerates to the exact box-spline patch, which the test suite verifies for
+arbitrary control data. The coefficients are this port's own rather than
+OpenSubdiv's `loopPatchBuilder.cpp` ones: the tangent scales (`1/3` of the
+cosine-weighted ring sum at interior vertices, `2/3` of the across-boundary
+eigenvector at crease vertices — the regular values, applied at every
+valence) were chosen by measuring the caps against deeply refined surfaces,
+where they stay within about 1% of the edge length for valences 3 to 12.
+
 Feature-adaptive refinement follows OpenSubdiv's approach: faces needing
 isolation are selected level by level with their one-ring support included
 (the role of `Vtr::SparseSelector`), producing sparse levels, and the test
 suite verifies that adaptive and uniform evaluation agree everywhere on the
-same meshes. Transition-edge tagging for crack-free hardware tessellation
+same meshes — for Loop as for Catmark. Transition-edge tagging for crack-free hardware tessellation
 is not provided — parametric evaluation needs none, as adjacent patches at
 different depths evaluate the same limit surface.
 
 Not yet ported (roadmap):
 
-- Loop-scheme (box-spline) patches and adaptive refinement for Loop
 - Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark

@@ -32,6 +32,7 @@ pub struct AdaptiveOptions {
     pub isolation_level: usize,
     /// Represent regular faces along a semi-sharp crease as single-crease
     /// patches instead of isolating the crease (`useSingleCreasePatch`).
+    /// Applies to the Catmark scheme only.
     ///
     /// A face whose corners are regular and which a single straight
     /// semi-sharp crease of uniform sharpness bounds on one side is not
@@ -305,17 +306,18 @@ impl TopologyRefiner {
     /// usual; [`super::PrimvarRefiner::limit`] and stencil tables require
     /// uniform refinement.
     ///
-    /// Adaptive refinement applies to the quad-split schemes: for Bilinear
-    /// only non-quad base faces need one round of isolation, and for Loop
-    /// (whose patches are not yet supported) this is a no-op.
+    /// For the Loop scheme the same isolation applies to triangles: faces
+    /// whose three corners are regular (interior valence 6, regular
+    /// boundary and crease vertices, pinned corners) are exact box-spline
+    /// patches and are not refined; the rest — extraordinary vertices,
+    /// semi-sharp creases, irregular boundaries and darts — descend to the
+    /// isolation cap. For Bilinear only non-quad base faces need one round
+    /// of isolation.
     pub fn refine_adaptive(&mut self, options: AdaptiveOptions) {
         assert!(
             self.max_level() == 0,
             "adaptive refinement must start from an unrefined refiner"
         );
-        if self.scheme_type() == SchemeType::Loop {
-            return;
-        }
         self.adaptive = true;
         self.single_crease_patch = options.use_single_crease_patch;
 
@@ -336,7 +338,7 @@ impl TopologyRefiner {
                                 && super::patch_table::single_crease_patch(level, f).is_some())
                     }
                     SchemeType::Bilinear => level.face_vertices(f).len() != 4,
-                    SchemeType::Loop => false,
+                    SchemeType::Loop => super::loop_patch::gather_regular_patch(level, f).is_none(),
                 };
                 if needs_isolation {
                     *sel = true;

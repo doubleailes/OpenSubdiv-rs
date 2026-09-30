@@ -653,6 +653,7 @@ fn smooth_boundaries_keep_the_bilinear_fallback() {
                     .any(|&v| level.vertex_edges(v as usize).len() == 5));
             }
             PatchType::Regular => assert!(!on_boundary),
+            other => panic!("Catmark never builds {other:?} patches"),
         }
     }
 }
