@@ -286,6 +286,29 @@ fn patch_param_and_patch_map_are_consistent() {
 }
 
 #[test]
+fn quad_patches_are_never_rotated_triangles() {
+    // Quadrant 2 of a quad ptex face has rotation 2, which is a plain
+    // half turn, not the inverted central child of a triangle.
+    let descriptor = TopologyDescriptor::new(8, &CUBE_VERTS_PER_FACE, &CUBE_FACE_VERTS);
+    let mut refiner = TopologyRefinerFactory::create(
+        descriptor,
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+    )
+    .unwrap();
+    refiner.refine_uniform(UniformOptions::new(1));
+    let table = PatchTableFactory::create(&refiner).unwrap();
+    let mut half_turns = 0;
+    for p in 0..table.num_patches() {
+        let param = table.patch_param(p);
+        assert!(!param.triangular);
+        assert!(!param.is_triangle_rotated());
+        half_turns += (param.rotation == 2) as usize;
+    }
+    assert_eq!(half_turns, 6);
+}
+
+#[test]
 fn non_quad_base_faces_use_ptex_subfaces() {
     // A pentagon: 5 ptex faces rooted at its level-1 children.
     let verts_per_face = [5usize];

@@ -24,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`PatchParam::is_triangle_rotated` for the inverted central children),
   `PatchMap::find_patch` locates triangles by ptex face and `(u, v)`, and
   `PtexIndices` maps every triangular base face to one ptex face.
-- `vtr::Refinement::refine_selected` supports sparse triangular splits.
+- `vtr::Refinement::refine_selected` supports sparse triangular splits;
+  `Refinement::expand_selection` and `Refinement::refine_included` expose
+  the one-ring expansion and the refinement of an explicit face mask.
+- `AdaptiveOptions::MAX_ISOLATION_LEVEL` (10, as in OpenSubdiv):
+  `refine_adaptive` clamps deeper requests to it, keeping patch depths
+  within the range their parametric scale `2^depth` is computed for.
 - Single-crease patches for semi-sharp creases (OpenSubdiv's
   `useSingleCreasePatch`), enabled with
   `AdaptiveOptions::with_single_crease_patch(true)`
@@ -46,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PatchParam` gained the public field `triangular` (true for the Loop
+  scheme's patches); `PatchParam::is_triangle_rotated` is false for every
+  quad patch, including those in the third quadrant of their ptex face.
+  Code building `PatchParam` with a struct literal must set the field.
 - The four children of a triangle under Loop refinement are now ordered
   and oriented as OpenSubdiv's `TriRefinement` orders them — the corner
   children `(v0, e0, e2)`, `(e0, v1, e1)`, `(e2, e1, v2)` keeping the
@@ -62,6 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`applyComponentTagsAndBoundarySharpness`). This changes refinement and
   limit positions around non-manifold features, which previously followed
   the smooth rules.
+
+### Fixed
+
+- Face-varying channels of an adaptively refined mesh are refined with the
+  geometry's expanded face mask instead of expanding the selection on
+  their own value meshes. Across seams the value mesh shares fewer
+  vertices, so it included fewer support faces than the geometry, and the
+  next isolation step panicked on the mismatched face counts.
 
 ### Removed
 

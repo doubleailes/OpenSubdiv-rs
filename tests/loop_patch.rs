@@ -7,8 +7,8 @@
 //! uniform ones everywhere.
 
 use opensubdiv_rs::far::{
-    AdaptiveOptions, PatchMap, PatchTable, PatchTableFactory, PatchType, PrimvarRefiner,
-    TopologyDescriptor, TopologyRefiner, TopologyRefinerFactory, UniformOptions,
+    AdaptiveOptions, FVarChannelDescriptor, PatchMap, PatchTable, PatchTableFactory, PatchType,
+    PrimvarRefiner, TopologyDescriptor, TopologyRefiner, TopologyRefinerFactory, UniformOptions,
 };
 use opensubdiv_rs::sdc;
 
@@ -658,4 +658,73 @@ fn semi_sharp_creases_are_isolated_until_they_decay() {
         &patch_controls(&uniform, &positions),
         2 * ((w - 1) * (h - 1)) as usize,
     );
+}
+
+#[test]
+fn face_varying_channels_refine_in_lockstep_across_seams() {
+    // A face-varying channel split along every edge: its value mesh
+    // shares no vertices between faces, so expanding the sparse selection
+    // on it would include fewer support faces than the geometry does. Both
+    // must refine the same faces at every isolation level, and the values
+    // interpolate through the sparse levels.
+    let (w, h) = (8u32, 7u32);
+    let (verts_per_face, face_verts) = grid_with_flipped_edge(w, h);
+    let uv_indices: Vec<u32> = (0..face_verts.len() as u32).collect();
+    let channels = [FVarChannelDescriptor::new(face_verts.len(), &uv_indices)];
+    let descriptor = TopologyDescriptor::new((w * h) as usize, &verts_per_face, &face_verts)
+        .with_fvar_channels(&channels);
+    let mut refiner = loop_refiner(descriptor, edge_and_corner());
+    refiner.refine_adaptive(AdaptiveOptions::new(4));
+    assert_eq!(refiner.max_level(), 4);
+
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut uvs: Vec<[f32; 2]> = (0..face_verts.len())
+        .map(|k| [(k % 3) as f32, (k / 3) as f32])
+        .collect();
+    for level in 1..=refiner.max_level() {
+        let topology = refiner.level(level);
+        // Every face of the (sparse) level carries three face-varying
+        // values of the level's value mesh.
+        let num_values = topology.num_fvar_values(0);
+        assert!(num_values > 0);
+        for face in 0..topology.num_faces() {
+            let values = topology.face_fvar_values(face, 0);
+            assert_eq!(values.len(), 3);
+            assert!(values.iter().all(|&v| (v as usize) < num_values));
+        }
+        let mut refined = vec![[0.0f32; 2]; topology.num_fvar_values(0)];
+        primvar.interpolate_face_varying(level, 0, &uvs, &mut refined);
+        uvs = refined;
+    }
+}
+
+#[test]
+fn isolation_stops_at_the_maximum_level() {
+    // Every face of the icosahedron would isolate forever; requesting a
+    // depth beyond the cap stops there, and the deepest patches still
+    // evaluate (their parametric scale is `2^depth`).
+    let descriptor = TopologyDescriptor::new(12, &ICOSA_VERTS_PER_FACE, &ICOSA_FACE_VERTS);
+    let positions = icosahedron_positions();
+    let mut refiner = loop_refiner(descriptor, sdc::Options::default());
+    refiner.refine_adaptive(AdaptiveOptions::new(40));
+    assert_eq!(refiner.max_level(), AdaptiveOptions::MAX_ISOLATION_LEVEL);
+    let table = PatchTableFactory::create(&refiner).unwrap();
+    let controls = patch_controls(&refiner, &positions);
+    let map = PatchMap::new(&table);
+    // At the cap: the 60 faces touching the valence-5 vertices, capped
+    // with Gregory triangles, and their 180 regular siblings.
+    let deepest = (0..table.num_patches())
+        .filter(|&p| table.patch_param(p).depth as usize == AdaptiveOptions::MAX_ISOLATION_LEVEL)
+        .count();
+    assert_eq!(deepest, 240);
+    assert_eq!(count(&table, PatchType::GregoryTriangle), 60);
+    let patch = map.find_patch(0, 1e-4, 1e-4).unwrap();
+    let param = table.patch_param(patch);
+    assert_eq!(param.depth as usize, AdaptiveOptions::MAX_ISOLATION_LEVEL);
+    assert!(param.triangular && !param.is_triangle_rotated());
+    let (point, _, _) = table.evaluate(patch, 1e-4, 1e-4, &controls);
+    let base = loop_refiner(descriptor, sdc::Options::default());
+    let mut limits = positions.clone();
+    PrimvarRefiner::new(&base).limit(&positions, &mut limits);
+    assert_close(point, limits[0], 1e-3);
 }

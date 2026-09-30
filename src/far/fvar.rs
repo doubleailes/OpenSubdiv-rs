@@ -164,13 +164,20 @@ impl FVarChannel {
         })
     }
 
-    /// Refine the channel by one level, in lockstep with the geometry
-    /// (using the same face selection for sparse/adaptive refinement, as
-    /// the value mesh's faces mirror the geometry's).
-    pub(super) fn refine_once(&mut self, selection: Option<&[bool]>) {
-        let (mut child, refinement) =
-            Refinement::refine_selected(self.levels.last().unwrap(), &self.scheme, selection)
-                .expect("refined face-varying topology is always internally consistent");
+    /// Refine the channel by one level, in lockstep with the geometry:
+    /// `included` is the geometry's mask of faces to refine (its selection
+    /// already expanded to the one-ring support), or `None` for uniform
+    /// refinement. The value mesh's faces mirror the geometry's, so the
+    /// same mask applies — it must not be re-expanded on the value mesh,
+    /// whose seams split vertices and would include fewer support faces,
+    /// leaving the two meshes with different child faces.
+    pub(super) fn refine_once(&mut self, included: Option<&[bool]>) {
+        let parent = self.levels.last().unwrap();
+        let (mut child, refinement) = match included {
+            Some(included) => Refinement::refine_included(parent, &self.scheme, included),
+            None => Refinement::refine(parent, &self.scheme),
+        }
+        .expect("refined face-varying topology is always internally consistent");
         // `Boundaries` pins *every* boundary value, including the values
         // newly created on boundary/seam edges, so it must be re-applied at
         // each level (the other modes' pins persist through vertex-sharpness

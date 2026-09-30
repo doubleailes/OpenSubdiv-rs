@@ -121,6 +121,9 @@ pub struct PatchParam {
     pub rotation: u8,
     /// Ptex-frame coordinates of the patch's `(0, 0)` corner.
     pub origin: [f32; 2],
+    /// Is the patch triangular (the Loop scheme), its domain `s, t >= 0`,
+    /// `s + t <= 1` rather than the unit square?
+    pub triangular: bool,
 }
 
 impl PatchParam {
@@ -142,9 +145,10 @@ impl PatchParam {
     }
 
     /// Is this triangular patch inverted with respect to its ptex face
-    /// (`PatchParam::IsTriangleRotated`)? Always false for quad patches.
+    /// (`PatchParam::IsTriangleRotated`)? Always false for quad patches,
+    /// whose rotation 2 is a plain 180° turn.
     pub fn is_triangle_rotated(&self) -> bool {
-        self.rotation == 2
+        self.triangular && self.rotation == 2
     }
 
     /// The Jacobian `d(s,t)/d(u,v)` of [`normalize`](Self::normalize), as
@@ -792,6 +796,7 @@ fn compute_patch_param(
             depth: 0,
             rotation: 0,
             origin: [0.0, 0.0],
+            triangular,
         };
     }
 
@@ -807,6 +812,7 @@ fn compute_patch_param(
             depth,
             rotation,
             origin,
+            triangular,
         }
     } else {
         PatchParam {
@@ -814,6 +820,7 @@ fn compute_patch_param(
             depth,
             rotation,
             origin,
+            triangular,
         }
     }
 }
