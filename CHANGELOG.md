@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Single-crease patches for semi-sharp creases (OpenSubdiv's
+  `useSingleCreasePatch`), enabled with
+  `AdaptiveOptions::with_single_crease_patch(true)`
+  ([#11](https://github.com/doubleailes/OpenSubdiv-rs/issues/11)). Regular
+  faces bounded on one side by a straight semi-sharp crease of uniform
+  sharpness are no longer isolated by `refine_adaptive`: the patch table
+  covers each with one exact `PatchType::Regular` patch whose basis across
+  the crease is the crease's limit profile, and
+  `PatchTable::single_crease_sharpness` reports its sharpness. Along such a
+  crease the patch count drops from `4^level` per face to one.
 - Patches around non-manifold features
   ([#10](https://github.com/doubleailes/OpenSubdiv-rs/issues/10)): faces
   incident non-manifold edges or vertices are now patched over their own
@@ -20,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `AdaptiveOptions` gained the public field `use_single_crease_patch`
+  (default `false`); code building it with a struct literal must set it or
+  use `AdaptiveOptions::new`.
 - Non-manifold edges are made infinitely sharp when the base level is
   built, and non-manifold vertices infinitely sharp unless they lie on a
   crease of exactly two non-manifold edges bounding every fan of faces

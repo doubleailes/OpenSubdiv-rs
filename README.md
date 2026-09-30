@@ -108,7 +108,11 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   irregular infinitely sharp features — are isolated, together with their
   one-ring support, until they resolve or reach the isolation level. Levels above the base are *sparse*: memory grows with
   the mesh's features, not with `4^level`, while the patch table evaluates
-  the identical limit surface with far fewer patches
+  the identical limit surface with far fewer patches. With
+  `AdaptiveOptions::with_single_crease_patch(true)` (OpenSubdiv's
+  `useSingleCreasePatch`), regular faces along a semi-sharp crease are not
+  isolated at all: each becomes one exact **single-crease patch** carrying
+  the crease's sharpness
 - **Semi-sharp creasing**: edge creases and vertex corners with fractional
   sharpness, `Uniform` and `Chaikin` crease subdivision, and the transitional
   blending of smooth/crease/corner masks across levels
@@ -183,6 +187,18 @@ bilinear quads of the refined level; semi-sharp features that
 are still unresolved at the isolation cap are capped as if smooth, as
 OpenSubdiv does.
 
+Single-crease patches (Nießner et al., "Efficient Evaluation of Semi-Smooth
+Creases in Catmull-Clark Subdivision Surfaces") are built for interior quads
+with valence-4 corners bounded on one side by a straight semi-sharp crease of
+uniform sharpness. Around such a face every refinement mask is the tensor
+product of the B-spline rule along the crease with a one-dimensional crease
+rule across it, so the patch evaluates the exact limit surface — under
+`Uniform` and `Chaikin` creasing alike — as the linear blend of the profiles
+of the two integer sharpnesses bracketing the crease's. OpenSubdiv
+additionally caps the stored sharpness at the remaining isolation levels;
+this port evaluates the authored sharpness exactly instead. Faces where the
+crease ends, turns or changes sharpness are isolated as before.
+
 Feature-adaptive refinement follows OpenSubdiv's approach: faces needing
 isolation are selected level by level with their one-ring support included
 (the role of `Vtr::SparseSelector`), producing sparse levels, and the test
@@ -193,7 +209,6 @@ different depths evaluate the same limit surface.
 
 Not yet ported (roadmap):
 
-- Single-crease patches for semi-sharp creases (`useSingleCreasePatch`)
 - Loop-scheme (box-spline) patches and adaptive refinement for Loop
 - Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
