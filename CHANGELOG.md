@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built as OpenSubdiv's `GregoryConverter` builds them, instead of falling
   back to bilinear quads
   ([#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8)).
-  `PatchType::Quads` now only appears for non-manifold neighborhoods (and
-  the Bilinear scheme).
+  `PatchType::Quads` now only appears for non-manifold neighborhoods,
+  irregular faces on unsharpened (`VtxBoundaryInterpolation::None`)
+  boundaries, and the Bilinear scheme.
 - Infinitely sharp creases are treated as boundaries by regular patches
   (OpenSubdiv's `useInfSharpPatch`): faces whose corners are regular crease
   vertices, or fully creased corners, become exact B-spline patches with the
