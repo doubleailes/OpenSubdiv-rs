@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Gregory end caps for every irregular manifold face, not only smooth
+  interior extraordinary vertices: irregular boundary corners, corners on
+  infinitely sharp creases, sharp (pinned or multiply creased) corners,
+  darts and smooth boundary corners are now capped with Gregory patches
+  built as OpenSubdiv's `GregoryConverter` builds them, instead of falling
+  back to bilinear quads
+  ([#8](https://github.com/doubleailes/OpenSubdiv-rs/issues/8)).
+  `PatchType::Quads` now only appears for non-manifold neighborhoods (and
+  the Bilinear scheme).
+- Infinitely sharp creases are treated as boundaries by regular patches
+  (OpenSubdiv's `useInfSharpPatch`): faces whose corners are regular crease
+  vertices, or fully creased corners, become exact B-spline patches with the
+  phantom-point reflection across the crease, and feature-adaptive
+  refinement no longer isolates such regular creases to the cap.
+
+### Changed
+
+- Smooth interior extraordinary corners of Gregory caps now use
+  OpenSubdiv's own edge-point coefficients (`CatmarkLimits`, with its
+  valence-dependent edge factor) rather than Loop, Schaefer, Nießner &
+  Castaño's published construction, so caps match the reference's surface
+  at the same isolation level. The two agree exactly on regular
+  neighborhoods and differ slightly at extraordinary vertices.
+
 ## [0.1.4] - 2026-09-29
 
 ### Fixed

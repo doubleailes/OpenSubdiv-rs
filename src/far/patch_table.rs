@@ -20,23 +20,25 @@
 //! ## Patch types
 //!
 //! * [`PatchType::Regular`] — where the face's four corners are *regular*
-//!   (interior valence-4 smooth vertices, or regular boundary/pinned-corner
-//!   vertices with sharpened boundaries), the limit surface over the face is
-//!   exactly a bicubic B-spline patch on 16 control vertices of the last
-//!   level. Boundary and corner patches are represented by marking the
-//!   missing control vertices and folding their *phantom-point* reflection
-//!   (`2a - b`) into the basis weights at evaluation time — mathematically
-//!   equivalent to OpenSubdiv's boundary/corner basis masks.
-//! * [`PatchType::GregoryBasis`] — faces whose corners are smooth interior
-//!   vertices but include extraordinary valences are capped with a Gregory
-//!   patch (see [`super::gregory`]): 20 derived points giving corner
-//!   limit-point interpolation, exact C0 boundaries and approximate G1
-//!   smoothness, as OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
-//! * [`PatchType::Quads`] — anywhere else (irregularity involving creases,
-//!   boundaries such as unsharpened `VtxBoundaryInterpolation::None`, or
-//!   non-manifold neighborhoods), the patch falls back to bilinear
-//!   interpolation of the refined face. The approximation error is
-//!   confined to those faces and shrinks with each refinement level.
+//!   (interior valence-4 smooth vertices; regular boundary vertices with
+//!   sharpened boundaries; pinned corners; and vertices on an infinitely
+//!   sharp crease whose span of faces on the patch's side is regular), the
+//!   limit surface over the face is exactly a bicubic B-spline patch on 16
+//!   control vertices of the last level. Boundary, crease and corner
+//!   patches are represented by marking the missing control vertices and
+//!   folding their *phantom-point* reflection (`2a - b`) into the basis
+//!   weights at evaluation time — mathematically equivalent to OpenSubdiv's
+//!   boundary/corner basis masks, with infinitely sharp creases treated as
+//!   boundaries (OpenSubdiv's `useInfSharpPatch`).
+//! * [`PatchType::GregoryBasis`] — every other manifold face at its
+//!   isolation level is capped with a Gregory patch (see
+//!   [`super::gregory`]): extraordinary vertices, irregular boundary and
+//!   crease corners, sharp corners and darts. The 20 derived points give
+//!   corner limit-point interpolation, exact C0 boundaries and approximate
+//!   G1 smoothness, as OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
+//! * [`PatchType::Quads`] — non-manifold neighborhoods (and every face of
+//!   the Bilinear scheme, whose mesh is its own limit surface) fall back to
+//!   bilinear interpolation of the refined face.
 //!
 //! Control-vertex indices refer to the **concatenation of every level's
 //! vertices**, base level first: evaluate patches against the base values
@@ -44,11 +46,11 @@
 //! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
 //! output.
 
-use super::gregory::{self, GregoryPoints};
+use super::gregory::{self, corner_span, is_edge_singular, vertex_rule, GregoryPoints};
 use super::primvar_refiner::Primvar;
 use super::ptex::PtexIndices;
 use super::topology_refiner::TopologyRefiner;
-use crate::sdc::{Crease, SchemeType, Split};
+use crate::sdc::{Crease, Rule, SchemeType, Split};
 use crate::vtr::{Level, TopologyError};
 use crate::{Index, INDEX_INVALID};
 
@@ -471,8 +473,9 @@ impl PatchTableFactory {
                         }
                         PatchKind::Regular(cvs)
                     } else if let Some(mut points) = gregory::build(inner, face) {
-                        // Smooth interior extraordinary neighborhood:
-                        // Gregory end cap.
+                        // Irregular manifold neighborhood (extraordinary,
+                        // boundary, crease, sharp or dart corners): Gregory
+                        // end cap.
                         for point in points.iter_mut() {
                             for (cv, _) in point.0.iter_mut() {
                                 *cv += offset;
@@ -480,8 +483,7 @@ impl PatchTableFactory {
                         }
                         PatchKind::Gregory(points)
                     } else {
-                        // Creased or boundary irregularity: bilinear
-                        // fallback.
+                        // Non-manifold neighborhood: bilinear fallback.
                         PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                     }
                 } else {
@@ -615,45 +617,67 @@ fn quad_cvs(level: &Level, face: usize) -> [Index; 4] {
     cvs
 }
 
-/// Is this vertex regular for the purpose of B-spline patch extraction?
-fn is_corner_regular(level: &Level, vertex: Index) -> bool {
-    let v = vertex as usize;
+/// Is corner `corner` of `face` regular for the purpose of B-spline patch
+/// extraction (`PatchBuilder::IsPatchRegular`, one corner)?
+///
+/// Regularity is decided by the *span* of faces around the vertex that
+/// contains the face — the fan bounded by boundary edges and infinitely
+/// sharp creases, which the limit surface treats alike:
+///
+/// * a smooth vertex must be interior with valence 4;
+/// * a vertex on an infinitely sharp crease (exactly two infinitely sharp
+///   edges) must be a regular boundary vertex, or an interior vertex whose
+///   span on the patch's side holds exactly two faces;
+/// * an infinitely sharp corner (a pinned vertex, or three or more
+///   infinitely sharp edges) must have a single-face span;
+/// * darts are never regular.
+///
+/// Semi-sharp features are never regular: adaptive refinement isolates
+/// them until they decay (or the isolation cap is reached, where they are
+/// capped with Gregory patches).
+fn is_corner_regular(level: &Level, face: usize, corner: usize) -> bool {
+    let v = level.face_vertices(face)[corner] as usize;
+    let edges = level.vertex_edges(v);
     let num_faces = level.vertex_faces(v).len();
-    let num_edges = level.vertex_edges(v).len();
-    let sharpness = level.vertex_sharpness(v);
+    let vertex_sharpness = level.vertex_sharpness(v);
 
-    let edges_ok = |require_boundary_sharp: bool| {
-        level.vertex_edges(v).iter().all(|&e| {
-            let e = e as usize;
-            if level.is_edge_boundary(e) {
-                require_boundary_sharp && Crease::is_infinite(level.edge_sharpness(e))
+    if Crease::is_semi_sharp(vertex_sharpness)
+        || edges
+            .iter()
+            .any(|&e| Crease::is_semi_sharp(level.edge_sharpness(e as usize)))
+    {
+        return false;
+    }
+    let inf_edges = edges
+        .iter()
+        .filter(|&&e| Crease::is_infinite(level.edge_sharpness(e as usize)))
+        .count();
+    let boundary = level.is_vertex_boundary(v);
+    let span_faces = || corner_span(level, face, corner, true).map(|span| span.num_faces());
+
+    match vertex_rule(vertex_sharpness, inf_edges) {
+        Rule::Smooth => !boundary && edges.len() == 4 && num_faces == 4,
+        Rule::Dart => false,
+        Rule::Crease => {
+            if boundary {
+                num_faces == 2 && edges.len() == 3
             } else {
-                level.edge_sharpness(e) == 0.0
+                span_faces() == Some(2)
             }
-        })
-    };
-
-    if !level.is_vertex_boundary(v) {
-        // Interior: valence 4, smooth vertex, smooth edges.
-        num_edges == 4 && num_faces == 4 && sharpness == 0.0 && edges_ok(false)
-    } else if num_faces == 2 && num_edges == 3 {
-        // Regular boundary vertex on a sharpened boundary.
-        sharpness == 0.0 && edges_ok(true)
-    } else if num_faces == 1 && num_edges == 2 {
-        // Boundary corner: regular only when pinned (EdgeAndCorner), which
-        // matches the interpolating end-condition of the phantom-point
-        // reflection.
-        Crease::is_infinite(sharpness) && edges_ok(true)
-    } else {
-        false
+        }
+        Rule::Corner => inf_edges > 0 && span_faces() == Some(1),
+        Rule::Unknown => false,
     }
 }
 
-fn other_face_of_edge(level: &Level, edge: Index, face: Index) -> Option<Index> {
-    let faces = level.edge_faces(edge as usize);
-    if faces.len() != 2 {
+/// The face across `edge` from `face`, or `None` when the edge is a wall of
+/// the patch's neighborhood: a boundary, a non-manifold edge or an
+/// infinitely sharp crease.
+fn cross_edge(level: &Level, edge: Index, face: Index) -> Option<Index> {
+    if is_edge_singular(level, edge, true) {
         return None;
     }
+    let faces = level.edge_faces(edge as usize);
     Some(if faces[0] == face { faces[1] } else { faces[0] })
 }
 
@@ -687,8 +711,9 @@ fn diagonal_in_face(level: &Level, face: Index, v: Index) -> Option<Index> {
 }
 
 /// Attempt to classify `face` as a regular B-spline patch and gather its
-/// 4x4 control-vertex grid; phantom (boundary) slots are `INDEX_INVALID`.
-/// Also used by adaptive refinement to decide which faces need isolation.
+/// 4x4 control-vertex grid; phantom slots (beyond a boundary or an
+/// infinitely sharp crease) are `INDEX_INVALID`. Also used by adaptive
+/// refinement to decide which faces need isolation.
 ///
 /// The grid is row-major with rows along `t`:
 ///
@@ -704,8 +729,8 @@ pub(super) fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index;
         return None;
     }
     let [c0, c1, c2, c3] = [fv[0], fv[1], fv[2], fv[3]];
-    for &c in &[c0, c1, c2, c3] {
-        if !is_corner_regular(level, c) {
+    for corner in 0..4 {
+        if !is_corner_regular(level, face, corner) {
             return None;
         }
     }
@@ -718,11 +743,12 @@ pub(super) fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index;
     cvs[10] = c2;
     cvs[9] = c3;
 
-    // Row/column neighbors across the face's four edges.
-    let a0 = other_face_of_edge(level, fe[0], face); // below  (row 0/1)
-    let a1 = other_face_of_edge(level, fe[1], face); // right  (col 3)
-    let a2 = other_face_of_edge(level, fe[2], face); // above  (row 3)
-    let a3 = other_face_of_edge(level, fe[3], face); // left   (col 0)
+    // Row/column neighbors across the face's four edges (missing across
+    // boundaries and infinitely sharp creases).
+    let a0 = cross_edge(level, fe[0], face); // below  (row 0/1)
+    let a1 = cross_edge(level, fe[1], face); // right  (col 3)
+    let a2 = cross_edge(level, fe[2], face); // above  (row 3)
+    let a3 = cross_edge(level, fe[3], face); // left   (col 0)
 
     if let Some(a) = a0 {
         cvs[1] = neighbor_in_face(level, a, c0, c1)?;
@@ -772,12 +798,13 @@ pub(super) fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index;
 /// The diagonal control vertex at a grid corner, found by crossing from the
 /// row-neighbor face `a` over the edge `(c, inner)` into the corner face.
 /// Returns `INDEX_INVALID` (a phantom slot) when the neighborhood ends at a
-/// boundary, and `None` when a non-quad face makes the patch irregular.
+/// boundary or infinitely sharp crease, and `None` when a non-quad face
+/// makes the patch irregular.
 fn gather_corner_cv(level: &Level, a: Option<Index>, c: Index, inner: Index) -> Option<Index> {
     if let Some(a) = a {
         if inner != INDEX_INVALID {
             if let Some(edge) = level.find_edge(c, inner) {
-                if let Some(d) = other_face_of_edge(level, edge, a) {
+                if let Some(d) = cross_edge(level, edge, a) {
                     // A non-quad corner face is disqualifying, not phantom.
                     return diagonal_in_face(level, d, c);
                 }
