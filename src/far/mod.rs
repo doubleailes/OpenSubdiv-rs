@@ -9,16 +9,22 @@
 //!   [`TopologyRefiner`].
 //! * [`TopologyRefiner`] — stores the hierarchy of refinement
 //!   [levels](TopologyLevel) and performs [uniform
-//!   refinement](TopologyRefiner::refine_uniform).
+//!   refinement](TopologyRefiner::refine_uniform) or [feature-adaptive
+//!   refinement](TopologyRefiner::refine_adaptive).
 //! * [`PrimvarRefiner`] — interpolates primvar data (positions, colors, …)
 //!   from one level to the next, and onto the limit surface — including
 //!   face-varying channels (UVs) declared on the descriptor.
 //! * [`StencilTable`] / [`StencilTableFactory`] — factorize the whole
 //!   refinement (or limit evaluation) into flat per-vertex stencils on the
 //!   base-level control vertices.
+//! * [`PatchTable`] / [`PatchTableFactory`] / [`PatchMap`] — parametric
+//!   patches covering the limit surface (B-spline and Gregory patches for
+//!   Catmark, box-spline and Gregory triangle patches for Loop), located
+//!   by ptex face and `(u, v)`.
 
 mod fvar;
 mod gregory;
+mod loop_patch;
 mod patch_table;
 mod primvar_refiner;
 mod ptex;

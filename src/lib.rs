@@ -76,13 +76,14 @@
 //!
 //! Face-varying channels (UVs with seams, all `FVarLinearInterpolation`
 //! rules), stencil tables ([`far::StencilTable`]), patch tables
-//! ([`far::PatchTable`], for parametric limit evaluation with derivatives,
-//! including Gregory end caps at extraordinary vertices and on irregular
-//! boundaries and infinitely sharp creases) and
+//! ([`far::PatchTable`], for parametric limit evaluation with derivatives:
+//! B-spline patches and Gregory end caps for Catmark, box-spline patches
+//! and Gregory triangles for Loop, at extraordinary vertices and on
+//! irregular boundaries and infinitely sharp creases) and
 //! feature-adaptive refinement
-//! ([`far::TopologyRefiner::refine_adaptive`], with sparse levels,
-//! mixed-depth patches and optional single-crease patches for semi-sharp
-//! creases) are supported. Not yet ported: the `Osd` GPU
+//! ([`far::TopologyRefiner::refine_adaptive`], for both schemes, with
+//! sparse levels, mixed-depth patches and optional single-crease patches
+//! for semi-sharp creases) are supported. Not yet ported: the `Osd` GPU
 //! layer. See the project README for the roadmap.
 
 #![forbid(unsafe_code)]

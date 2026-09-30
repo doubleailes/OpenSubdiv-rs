@@ -53,6 +53,16 @@
 //!   scheme (whose mesh is its own limit surface) fall back to bilinear
 //!   interpolation of the refined face.
 //!
+//! For the Loop scheme the same structure holds on triangles (see
+//! [`super::loop_patch`]): [`PatchType::Loop`] quartic box-spline patches
+//! on 12 control vertices where the three corners are regular (interior
+//! valence 6, regular boundary and crease vertices, pinned corners),
+//! [`PatchType::GregoryTriangle`] end caps on 18 derived points elsewhere,
+//! and [`PatchType::Triangles`] for the linear fallback. A triangular
+//! patch's domain is `s, t >= 0`, `s + t <= 1`; its [`PatchParam`] carries
+//! only rotations 0 (upright) and 2 (inverted, for the central child of a
+//! subdivided triangle).
+//!
 //! Control-vertex indices refer to the **concatenation of every level's
 //! vertices**, base level first: evaluate patches against the base values
 //! followed by each level's
@@ -60,6 +70,7 @@
 //! output.
 
 use super::gregory::{self, corner_span, is_edge_singular, vertex_rule, GregoryPoints};
+use super::loop_patch::{self, GregoryTriPoints};
 use super::primvar_refiner::Primvar;
 use super::ptex::PtexIndices;
 use super::topology_refiner::TopologyRefiner;
@@ -77,6 +88,15 @@ pub enum PatchType {
     GregoryBasis,
     /// Bilinear quad on the face's 4 vertices.
     Quads,
+    /// Quartic box-spline triangle patch on 12 control vertices
+    /// (`PatchDescriptor::LOOP`), for regular faces of the Loop scheme.
+    Loop,
+    /// Gregory triangle end-cap patch: 18 derived points around an
+    /// irregular triangle (`PatchDescriptor::GREGORY_TRIANGLE`).
+    GregoryTriangle,
+    /// Linear triangle on the face's 3 vertices
+    /// (`PatchDescriptor::TRIANGLES`).
+    Triangles,
 }
 
 /// Location and orientation of a patch within the parametric space of its
@@ -84,6 +104,12 @@ pub enum PatchType {
 ///
 /// A patch's local coordinates `(s, t) ∈ [0,1]²` map to ptex-face
 /// coordinates via `(u, v) = origin + R(rotation) · (s, t) / 2^depth`.
+///
+/// Triangular patches (the Loop scheme) use the same transform over the
+/// domain `s, t >= 0`, `s + t <= 1`: the three corner children of a
+/// subdivided triangle keep their parent's orientation (rotation 0), and
+/// the central child is inverted (rotation 2, its `(0, 0)` corner at the
+/// parent's `(1/2, 1/2)`), as with OpenSubdiv's *rotated triangle* flag.
 #[derive(Debug, Clone, Copy)]
 pub struct PatchParam {
     /// The ptex face this patch belongs to.
@@ -113,6 +139,12 @@ impl PatchParam {
         let scale = 1.0 / (1u32 << self.depth) as f32;
         let (x, y) = rotate_ccw(self.rotation as u32, s, t);
         (self.origin[0] + x * scale, self.origin[1] + y * scale)
+    }
+
+    /// Is this triangular patch inverted with respect to its ptex face
+    /// (`PatchParam::IsTriangleRotated`)? Always false for quad patches.
+    pub fn is_triangle_rotated(&self) -> bool {
+        self.rotation == 2
     }
 
     /// The Jacobian `d(s,t)/d(u,v)` of [`normalize`](Self::normalize), as
@@ -160,6 +192,15 @@ enum PatchKind {
     Gregory(Box<GregoryPoints>),
     /// The face's 4 corner vertices.
     Quads([Index; 4]),
+    /// The 12 control vertices of a box-spline triangle (laid out as in
+    /// [`loop_patch::gather_regular_patch`]), with `INDEX_INVALID` marking
+    /// phantom slots beyond boundaries and infinitely sharp creases.
+    Loop([Index; 12]),
+    /// The 18 Gregory triangle control points as stencils on the last
+    /// level's vertices.
+    GregoryTriangle(Box<GregoryTriPoints>),
+    /// The face's 3 corner vertices.
+    Triangles([Index; 3]),
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +235,8 @@ pub struct PatchTable {
     first_child: Vec<Vec<Index>>,
     /// Total control values (sum of all levels' vertex counts).
     num_control_values: usize,
+    /// Are the patches triangular (the Loop scheme)?
+    triangular: bool,
 }
 
 impl PatchTable {
@@ -208,6 +251,9 @@ impl PatchTable {
             PatchKind::Regular(_) | PatchKind::SingleCrease { .. } => PatchType::Regular,
             PatchKind::Gregory(_) => PatchType::GregoryBasis,
             PatchKind::Quads(_) => PatchType::Quads,
+            PatchKind::Loop(_) => PatchType::Loop,
+            PatchKind::GregoryTriangle(_) => PatchType::GregoryTriangle,
+            PatchKind::Triangles(_) => PatchType::Triangles,
         }
     }
 
@@ -224,29 +270,37 @@ impl PatchTable {
     }
 
     /// The control vertices of patch `patch` (`GetPatchVertices`), as
-    /// indices into the last level's vertices. Phantom boundary slots of
-    /// regular patches are omitted; for Gregory patches this is the union
-    /// of the vertices supporting its 20 derived points.
+    /// indices into the concatenated control values. Phantom boundary
+    /// slots of regular patches are omitted; for Gregory patches this is
+    /// the union of the vertices supporting its derived points.
     pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
+        let stencil_support = |points: &[gregory::SparsePoint]| {
+            let mut cvs: Vec<Index> = Vec::new();
+            for point in points {
+                for &(cv, _) in &point.0 {
+                    if !cvs.contains(&cv) {
+                        cvs.push(cv);
+                    }
+                }
+            }
+            cvs
+        };
         match &self.patches[patch].kind {
             PatchKind::Regular(cvs) => cvs
                 .iter()
                 .copied()
                 .filter(|&cv| cv != INDEX_INVALID)
                 .collect(),
+            PatchKind::Loop(cvs) => cvs
+                .iter()
+                .copied()
+                .filter(|&cv| cv != INDEX_INVALID)
+                .collect(),
             PatchKind::SingleCrease { cvs, .. } => cvs.to_vec(),
             PatchKind::Quads(cvs) => cvs.to_vec(),
-            PatchKind::Gregory(points) => {
-                let mut cvs: Vec<Index> = Vec::new();
-                for point in points.iter() {
-                    for &(cv, _) in &point.0 {
-                        if !cvs.contains(&cv) {
-                            cvs.push(cv);
-                        }
-                    }
-                }
-                cvs
-            }
+            PatchKind::Triangles(cvs) => cvs.to_vec(),
+            PatchKind::Gregory(points) => stencil_support(&points[..]),
+            PatchKind::GregoryTriangle(points) => stencil_support(&points[..]),
         }
     }
 
@@ -373,6 +427,35 @@ impl PatchTable {
                     }
                 }
             }
+            PatchKind::Loop(cvs) => {
+                let (mut w, mut ws, mut wt) = loop_patch::box_spline_basis(s, t);
+                loop_patch::fold_phantom_weights(cvs, &mut w);
+                loop_patch::fold_phantom_weights(cvs, &mut ws);
+                loop_patch::fold_phantom_weights(cvs, &mut wt);
+                for (slot, &cv) in cvs.iter().enumerate() {
+                    if cv == INDEX_INVALID {
+                        debug_assert!(w[slot] == 0.0 && ws[slot] == 0.0 && wt[slot] == 0.0);
+                        continue;
+                    }
+                    push(cv, w[slot], ws[slot], wt[slot]);
+                }
+            }
+            PatchKind::GregoryTriangle(points) => {
+                let (w18, ws18, wt18) = loop_patch::evaluate_basis(s, t);
+                for (point, stencil) in points.iter().enumerate() {
+                    for &(cv, sw) in &stencil.0 {
+                        push(cv, w18[point] * sw, ws18[point] * sw, wt18[point] * sw);
+                    }
+                }
+            }
+            PatchKind::Triangles(cvs) => {
+                let w = [1.0 - s - t, s, t];
+                let ws = [-1.0, 1.0, 0.0];
+                let wt = [-1.0, 0.0, 1.0];
+                for (slot, &cv) in cvs.iter().enumerate() {
+                    push(cv, w[slot], ws[slot], wt[slot]);
+                }
+            }
         }
         basis
     }
@@ -419,16 +502,17 @@ impl<'a> PatchMap<'a> {
     }
 
     /// The patch covering coordinates `(u, v)` of `ptex_face`
-    /// (`FindPatch`): descends the quadrant hierarchy until a patch is
-    /// found, supporting mixed-depth (adaptive) tables. `None` only when
-    /// the location lies in a hole.
+    /// (`FindPatch`): descends the quadrant (or, for triangles, the
+    /// sub-triangle) hierarchy until a patch is found, supporting
+    /// mixed-depth (adaptive) tables. `None` only when the location lies in
+    /// a hole.
     pub fn find_patch(&self, ptex_face: usize, u: f32, v: f32) -> Option<usize> {
         let table = self.table;
         let base_face = table.ptex.base_face(ptex_face) as usize;
-        // Quad base faces map to exactly one ptex face; N-gons to N.
-        let base_is_quad = table.ptex.face_ptex_count(base_face) == 1;
+        // Regular base faces map to exactly one ptex face; N-gons to N.
+        let base_is_regular = table.ptex.face_ptex_count(base_face) == 1;
 
-        let (mut face, mut level, mut u, mut v) = if base_is_quad {
+        let (mut face, mut level, mut u, mut v) = if base_is_regular {
             (base_face, 0usize, u, v)
         } else {
             // Non-quad base faces root their ptex faces at level 1 (their
@@ -450,7 +534,11 @@ impl<'a> PatchMap<'a> {
             if first_child == INDEX_INVALID {
                 return None; // unrefined support face without a patch
             }
-            let (k, nu, nv) = descend_quadrant(u, v);
+            let (k, nu, nv) = if table.triangular {
+                descend_triangle(u, v)
+            } else {
+                descend_quadrant(u, v)
+            };
             face = first_child as usize + k;
             u = nu;
             v = nv;
@@ -469,17 +557,17 @@ impl PatchTableFactory {
     ///
     /// # Errors
     ///
-    /// Returns [`TopologyError::LoopPatchesNotSupported`] for schemes that do
-    /// not split faces into quads, and
-    /// [`TopologyError::PatchesRequireRefinement`] when the base mesh contains
-    /// non-quad faces and `refiner` has not been refined at least once.
+    /// Returns [`TopologyError::PatchesRequireRefinement`] when the base
+    /// mesh contains non-quad faces (under a quad-split scheme) and
+    /// `refiner` has not been refined at least once.
     pub fn create(refiner: &TopologyRefiner) -> Result<PatchTable, TopologyError> {
-        if refiner.scheme_type().topological_split_type() != Split::ToQuads {
-            return Err(TopologyError::LoopPatchesNotSupported);
-        }
+        let scheme_type = refiner.scheme_type();
+        let triangular = scheme_type.topological_split_type() == Split::ToTris;
         let base = refiner.level(0);
-        let all_quads = (0..base.num_faces()).all(|f| base.face_vertices(f).len() == 4);
-        if !all_quads && refiner.max_level() == 0 {
+        let regular_size = scheme_type.regular_face_size();
+        let all_regular =
+            (0..base.num_faces()).all(|f| base.face_vertices(f).len() == regular_size);
+        if !all_regular && refiner.max_level() == 0 {
             return Err(TopologyError::PatchesRequireRefinement);
         }
 
@@ -509,7 +597,6 @@ impl PatchTableFactory {
         }
 
         let ptex = PtexIndices::new(refiner);
-        let smooth_scheme = refiner.scheme_type() == SchemeType::Catmark;
         let single_crease = refiner.uses_single_crease_patch();
 
         let mut patches = Vec::new();
@@ -528,40 +615,62 @@ impl PatchTableFactory {
                 if level < max_level && refiner.face_is_selected(level, face) {
                     continue; // refined further; patches come from children
                 }
-                let param = compute_patch_param(refiner, &ptex, &first_child, face, level);
-                let kind = if smooth_scheme {
-                    if let Some(mut cvs) = gather_regular_patch(inner, face) {
-                        for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
-                            *cv += offset;
-                        }
-                        PatchKind::Regular(cvs)
-                    } else if let Some(patch) = single_crease
-                        .then(|| single_crease_patch(inner, face))
-                        .flatten()
-                    {
-                        PatchKind::SingleCrease {
-                            cvs: patch.cvs.map(|cv| cv + offset),
-                            edge: patch.edge,
-                            sharpness: patch.sharpness,
-                        }
-                    } else if let Some(mut points) = gregory::build(inner, face) {
-                        // Irregular neighborhood (extraordinary, boundary,
-                        // crease, sharp, dart or non-manifold corners):
-                        // Gregory end cap.
-                        for point in points.iter_mut() {
-                            for (cv, _) in point.0.iter_mut() {
+                let param =
+                    compute_patch_param(refiner, &ptex, &first_child, face, level, triangular);
+                let kind = match scheme_type {
+                    SchemeType::Catmark => {
+                        if let Some(mut cvs) = gather_regular_patch(inner, face) {
+                            for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
                                 *cv += offset;
                             }
+                            PatchKind::Regular(cvs)
+                        } else if let Some(patch) = single_crease
+                            .then(|| single_crease_patch(inner, face))
+                            .flatten()
+                        {
+                            PatchKind::SingleCrease {
+                                cvs: patch.cvs.map(|cv| cv + offset),
+                                edge: patch.edge,
+                                sharpness: patch.sharpness,
+                            }
+                        } else if let Some(mut points) = gregory::build(inner, face) {
+                            // Irregular neighborhood (extraordinary, boundary,
+                            // crease, sharp, dart or non-manifold corners):
+                            // Gregory end cap.
+                            for point in points.iter_mut() {
+                                for (cv, _) in point.0.iter_mut() {
+                                    *cv += offset;
+                                }
+                            }
+                            PatchKind::Gregory(points)
+                        } else {
+                            // Unsharpened boundary or non-quad ring: bilinear
+                            // fallback.
+                            PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                         }
-                        PatchKind::Gregory(points)
-                    } else {
-                        // Unsharpened boundary or non-quad ring: bilinear
-                        // fallback.
+                    }
+                    SchemeType::Loop => {
+                        if let Some(mut cvs) = loop_patch::gather_regular_patch(inner, face) {
+                            for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
+                                *cv += offset;
+                            }
+                            PatchKind::Loop(cvs)
+                        } else if let Some(mut points) = loop_patch::build(inner, face) {
+                            for point in points.iter_mut() {
+                                for (cv, _) in point.0.iter_mut() {
+                                    *cv += offset;
+                                }
+                            }
+                            PatchKind::GregoryTriangle(points)
+                        } else {
+                            // Unsharpened boundary: linear fallback.
+                            PatchKind::Triangles(tri_cvs(inner, face).map(|cv| cv + offset))
+                        }
+                    }
+                    // Bilinear: the mesh is its own limit surface.
+                    SchemeType::Bilinear => {
                         PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                     }
-                } else {
-                    // Bilinear: the mesh is its own limit surface.
-                    PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                 };
                 *patch_slot = patches.len() as Index;
                 patches.push(Patch {
@@ -579,6 +688,7 @@ impl PatchTableFactory {
             max_level,
             first_child,
             num_control_values: total,
+            triangular,
         })
     }
 }
@@ -615,15 +725,39 @@ fn descend_quadrant(u: f32, v: f32) -> (usize, f32, f32) {
     (k, x * 2.0, y * 2.0)
 }
 
+/// Origins and rotations of the four children of a triangle within their
+/// parent: the corner children are upright at the corners, the central
+/// child inverted about the center.
+const TRI_CHILD_ORIGIN: [[f32; 2]; 4] = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
+const TRI_CHILD_ROTATION: [usize; 4] = [0, 0, 0, 2];
+
+/// Select the child sub-triangle containing `(u, v)` and transform into the
+/// child's parametric frame (see [`TRI_CHILD_ORIGIN`]).
+fn descend_triangle(u: f32, v: f32) -> (usize, f32, f32) {
+    let k = if u >= 0.5 {
+        1
+    } else if v >= 0.5 {
+        2
+    } else if u + v >= 0.5 {
+        3
+    } else {
+        0
+    };
+    let (x, y) = (u - TRI_CHILD_ORIGIN[k][0], v - TRI_CHILD_ORIGIN[k][1]);
+    let (x, y) = rotate_ccw((4 - TRI_CHILD_ROTATION[k] as u32) % 4, x, y);
+    (k, x * 2.0, y * 2.0)
+}
+
 /// Compute the [`PatchParam`] of a face of level `level` by walking its
-/// ancestry down to the ptex root, composing the quadrant transforms
-/// `uv = corner_k + R_k · (child uv) / 2`.
+/// ancestry down to the ptex root, composing the quadrant (or
+/// sub-triangle) transforms `uv = origin_k + R_k · (child uv) / 2`.
 fn compute_patch_param(
     refiner: &TopologyRefiner,
     ptex: &PtexIndices,
     first_child: &[Vec<Index>],
     face: usize,
     level: usize,
+    triangular: bool,
 ) -> PatchParam {
     let mut origin = [0.0f32; 2];
     let mut rotation = 0u8;
@@ -631,14 +765,19 @@ fn compute_patch_param(
     let mut face = face;
 
     let compose = |origin: &mut [f32; 2], rotation: &mut u8, depth: &mut u8, k: usize| {
-        let (x, y) = rotate_ccw(k as u32, origin[0], origin[1]);
-        origin[0] = CORNER_UV[k][0] + 0.5 * x;
-        origin[1] = CORNER_UV[k][1] + 0.5 * y;
-        *rotation = ((*rotation as usize + k) % 4) as u8;
+        let (child_origin, child_rotation) = if triangular {
+            (TRI_CHILD_ORIGIN[k], TRI_CHILD_ROTATION[k])
+        } else {
+            (CORNER_UV[k], k)
+        };
+        let (x, y) = rotate_ccw(child_rotation as u32, origin[0], origin[1]);
+        origin[0] = child_origin[0] + 0.5 * x;
+        origin[1] = child_origin[1] + 0.5 * y;
+        *rotation = ((*rotation as usize + child_rotation) % 4) as u8;
         *depth += 1;
     };
 
-    // Steps between levels >= 2 are always quadrants of a quad parent.
+    // Steps between levels >= 2 are always children of a regular parent.
     for l in (2..=level).rev() {
         let parent = refiner.refinement(l).child_face_parent_face(face) as usize;
         let k = face - first_child[l - 1][parent] as usize;
@@ -647,7 +786,7 @@ fn compute_patch_param(
     }
 
     if level == 0 {
-        // A base-level (quad) face is its own patch domain.
+        // A base-level (regular) face is its own patch domain.
         return PatchParam {
             ptex_face: ptex.face_id(face),
             depth: 0,
@@ -656,12 +795,12 @@ fn compute_patch_param(
         };
     }
 
-    // The final step from level 1 to the base: for quad base faces it is a
-    // regular quadrant step of the (single) ptex face; for N-gons the
+    // The final step from level 1 to the base: for regular base faces it
+    // is a regular child step of the (single) ptex face; for N-gons the
     // level-1 child *is* the ptex root.
     let base = refiner.refinement(1).child_face_parent_face(face) as usize;
     let k = face - first_child[0][base] as usize;
-    if refiner.level(0).face_vertices(base).len() == 4 {
+    if ptex.face_ptex_count(base) == 1 {
         compose(&mut origin, &mut rotation, &mut depth, k);
         PatchParam {
             ptex_face: ptex.face_id(base),
@@ -686,6 +825,13 @@ fn compute_patch_param(
 fn quad_cvs(level: &Level, face: usize) -> [Index; 4] {
     let fv = level.face_vertices(face);
     let mut cvs = [INDEX_INVALID; 4];
+    cvs.copy_from_slice(fv);
+    cvs
+}
+
+fn tri_cvs(level: &Level, face: usize) -> [Index; 3] {
+    let fv = level.face_vertices(face);
+    let mut cvs = [INDEX_INVALID; 3];
     cvs.copy_from_slice(fv);
     cvs
 }

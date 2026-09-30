@@ -60,7 +60,7 @@ use crate::Index;
 pub(crate) struct SparsePoint(pub(crate) Vec<(Index, f32)>);
 
 impl SparsePoint {
-    fn of(entries: &[(Index, f32)]) -> SparsePoint {
+    pub(super) fn of(entries: &[(Index, f32)]) -> SparsePoint {
         let mut p = SparsePoint::default();
         for &(i, w) in entries {
             p.add(i, w);
@@ -68,20 +68,20 @@ impl SparsePoint {
         p
     }
 
-    fn add(&mut self, index: Index, weight: f32) {
+    pub(super) fn add(&mut self, index: Index, weight: f32) {
         match self.0.iter_mut().find(|(i, _)| *i == index) {
             Some((_, w)) => *w += weight,
             None => self.0.push((index, weight)),
         }
     }
 
-    fn add_scaled(&mut self, other: &SparsePoint, scale: f32) {
+    pub(super) fn add_scaled(&mut self, other: &SparsePoint, scale: f32) {
         for &(i, w) in &other.0 {
             self.add(i, w * scale);
         }
     }
 
-    fn scaled(&self, scale: f32) -> SparsePoint {
+    pub(super) fn scaled(&self, scale: f32) -> SparsePoint {
         SparsePoint(self.0.iter().map(|&(i, w)| (i, w * scale)).collect())
     }
 }
@@ -102,9 +102,10 @@ pub(super) fn is_edge_singular(level: &Level, edge: Index, inf_sharp: bool) -> b
     level.edge_faces(e).len() != 2 || (inf_sharp && Crease::is_infinite(level.edge_sharpness(e)))
 }
 
-/// The fan of faces around one corner of a quad that contains the patch
+/// The fan of faces around one corner of a face that contains the patch
 /// face, bounded by singular edges (`Vtr::Level::VSpan` plus the ring
-/// ordering of `Far::SourcePatch`).
+/// ordering of `Far::SourcePatch`). Every face of the span has the same
+/// size as the patch face (quads for Catmark, triangles for Loop).
 ///
 /// `edges` are the incident edges in counter-clockwise order and `faces[i]`
 /// sits between `edges[i]` and `edges[i + 1]`. For a periodic span
@@ -134,13 +135,15 @@ impl CornerSpan {
     }
 
     /// The far end of `edges[i]`.
-    fn edge_end(&self, level: &Level, i: usize) -> Index {
+    pub(super) fn edge_end(&self, level: &Level, i: usize) -> Index {
         level.edge_opposite_vertex(self.edges[i] as usize, self.vertex)
     }
 
-    /// The vertex of `faces[i]` diagonally opposite the corner vertex.
+    /// The vertex of (quad) `faces[i]` diagonally opposite the corner
+    /// vertex.
     fn diagonal(&self, level: &Level, i: usize) -> Index {
         let fv = level.face_vertices(self.faces[i] as usize);
+        debug_assert_eq!(fv.len(), 4);
         let k = fv
             .iter()
             .position(|&v| v == self.vertex)
@@ -174,10 +177,11 @@ fn other_edge_at_vertex(level: &Level, face: Index, vertex: Index, edge: Index) 
     }
 }
 
-/// Identify the span of quads around corner `corner` of `face`
+/// Identify the span of faces around corner `corner` of `face`
 /// (`identifyManifoldCornerSpan`), treating infinitely sharp edges as
 /// singular when `inf_sharp_singular` is set. `None` when the span contains
-/// non-quad faces.
+/// faces of a different size than `face` (non-quads around a quad, or
+/// non-triangles around a triangle).
 ///
 /// Non-manifold vertices need no special case: the walk never crosses a
 /// non-manifold edge, so the span is the manifold fan of faces containing
@@ -193,6 +197,7 @@ pub(super) fn corner_span(
     let fv = level.face_vertices(face);
     let fe = level.face_edges(face);
     let vertex = fv[corner];
+    let size = fv.len();
     let num_faces = level.vertex_faces(vertex as usize).len();
 
     let singular = |e: Index| is_edge_singular(level, e, inf_sharp_singular);
@@ -214,7 +219,7 @@ pub(super) fn corner_span(
             periodic = true;
             break;
         }
-        if level.face_vertices(next as usize).len() != 4 {
+        if level.face_vertices(next as usize).len() != size {
             return None;
         }
         start_edge = other_edge_at_vertex(level, next, vertex, start_edge)?;
@@ -244,7 +249,7 @@ pub(super) fn corner_span(
         }
         edges.push(current_edge);
         let next = other_face_of_edge(level, current_edge, current_face)?;
-        if level.face_vertices(next as usize).len() != 4 {
+        if level.face_vertices(next as usize).len() != size {
             return None;
         }
         faces.push(next);

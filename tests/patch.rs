@@ -330,21 +330,6 @@ fn non_quad_base_faces_use_ptex_subfaces() {
 }
 
 #[test]
-fn loop_patches_unsupported() {
-    let verts_per_face = [3usize; 4];
-    let face_verts = [0u32, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2];
-    let descriptor = TopologyDescriptor::new(4, &verts_per_face, &face_verts);
-    let mut refiner =
-        TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Loop, sdc::Options::default())
-            .unwrap();
-    refiner.refine_uniform(UniformOptions::new(1));
-    assert!(matches!(
-        PatchTableFactory::create(&refiner),
-        Err(Error::LoopPatchesNotSupported)
-    ));
-}
-
-#[test]
 fn gregory_end_caps_are_exact_at_evs_and_consistent_across_levels() {
     let evaluate_at = |levels: usize, u: f32, v: f32| -> P3 {
         let descriptor = TopologyDescriptor::new(8, &CUBE_VERTS_PER_FACE, &CUBE_FACE_VERTS);

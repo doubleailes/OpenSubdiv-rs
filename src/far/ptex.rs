@@ -6,10 +6,12 @@ use crate::Index;
 /// Mapping between base-level faces and *ptex* face indices
 /// (`Far::PtexIndices`).
 ///
-/// The ptex convention parameterizes the subdivision surface by quad
-/// domains: a quadrilateral base face maps to a single ptex face, while an
-/// N-sided base face maps to N ptex faces — one per corner, corresponding
-/// to its N quadrilateral child faces at refinement level 1.
+/// The ptex convention parameterizes the subdivision surface by the
+/// scheme's regular face domain: a *regular* base face (a quadrilateral
+/// for the quad-split schemes, a triangle for Loop) maps to a single ptex
+/// face, while an N-sided base face of a quad-split scheme maps to N ptex
+/// faces — one per corner, corresponding to its N quadrilateral child
+/// faces at refinement level 1.
 #[derive(Debug, Clone)]
 pub struct PtexIndices {
     /// Ptex index of the first ptex face of each base face (+ total).
@@ -26,13 +28,14 @@ impl PtexIndices {
     /// (`PtexIndices::PtexIndices`).
     pub fn new(refiner: &TopologyRefiner) -> Self {
         let base = refiner.level(0);
+        let regular_size = refiner.scheme_type().regular_face_size();
         let mut offsets = Vec::with_capacity(base.num_faces() + 1);
         let mut base_faces = Vec::new();
         let mut corners = Vec::new();
         offsets.push(0);
         for f in 0..base.num_faces() {
             let size = base.face_vertices(f).len();
-            let count = if size == 4 { 1 } else { size };
+            let count = if size == regular_size { 1 } else { size };
             for k in 0..count {
                 base_faces.push(f as Index);
                 corners.push(k as u16);
@@ -57,8 +60,8 @@ impl PtexIndices {
         self.offsets[face]
     }
 
-    /// The number of ptex faces of base face `face`: 1 for quads, N for
-    /// N-gons.
+    /// The number of ptex faces of base face `face`: 1 for regular faces
+    /// (quads, or triangles under Loop), N for N-gons.
     pub fn face_ptex_count(&self, face: usize) -> usize {
         (self.offsets[face + 1] - self.offsets[face]) as usize
     }
@@ -69,7 +72,7 @@ impl PtexIndices {
     }
 
     /// The corner of the base face covered by ptex face `ptex_face` (always
-    /// 0 for quad base faces, which map to a single ptex face).
+    /// 0 for regular base faces, which map to a single ptex face).
     pub fn base_face_corner(&self, ptex_face: usize) -> usize {
         self.corners[ptex_face] as usize
     }

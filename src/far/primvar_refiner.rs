@@ -346,18 +346,16 @@ fn interpolate_child_verts_from_verts<T: Primvar>(
             continue; // not refined (sparse refinement)
         }
 
-        // A fringe vertex of a sparse refinement can be missing children of
-        // its incident components; its child only supports the region and
-        // is never used by patches, so carrying the parent value suffices.
-        let incomplete = parent
-            .vertex_edges(v)
-            .iter()
-            .any(|&e| refinement.edge_child_vertex(e as usize) == INDEX_INVALID)
-            || (refinement.split() == Split::ToQuads
-                && parent
-                    .vertex_faces(v)
-                    .iter()
-                    .any(|&f| refinement.face_child_vertex(f as usize) == INDEX_INVALID));
+        // A fringe vertex of a sparse quad refinement can be missing the
+        // face child-vertices its smooth mask references; its child only
+        // supports the region and is never used by patches, so carrying the
+        // parent value suffices. Triangular masks reference parent vertices
+        // only, so they are always complete.
+        let incomplete = refinement.split() == Split::ToQuads
+            && parent
+                .vertex_faces(v)
+                .iter()
+                .any(|&f| refinement.face_child_vertex(f as usize) == INDEX_INVALID);
 
         if linear || incomplete {
             dst[cv as usize] = src[v].clone();

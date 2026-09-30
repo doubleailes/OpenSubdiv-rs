@@ -1,7 +1,8 @@
 //! One step of refinement between two levels (port of
 //! `opensubdiv/vtr/refinement.h` — the uniform `QuadRefinement` /
 //! `TriRefinement` paths plus the *sparse* (selected) refinement used by
-//! feature-adaptive isolation, the role of `Vtr::internal::SparseSelector`).
+//! feature-adaptive isolation, the role of `Vtr::internal::SparseSelector`,
+//! for both splits).
 
 use super::level::{Level, TopologyError};
 use crate::sdc::{Crease, Scheme, Split};
@@ -106,13 +107,7 @@ impl Refinement {
 
         match scheme.scheme_type().topological_split_type() {
             Split::ToQuads => Self::refine_quads(parent, scheme, &included),
-            Split::ToTris => {
-                assert!(
-                    selection.is_none(),
-                    "sparse refinement is not supported for triangular splits"
-                );
-                Self::refine_tris(parent, scheme)
-            }
+            Split::ToTris => Self::refine_tris(parent, scheme, &included),
             Split::Hybrid => unimplemented!("hybrid splits are not used by any scheme"),
         }
     }
@@ -212,48 +207,84 @@ impl Refinement {
         Ok((child, refinement))
     }
 
-    fn refine_tris(parent: &Level, scheme: &Scheme) -> Result<(Level, Refinement), TopologyError> {
+    fn refine_tris(
+        parent: &Level,
+        scheme: &Scheme,
+        included: &[bool],
+    ) -> Result<(Level, Refinement), TopologyError> {
         let (num_faces, num_edges, num_verts) = (
             parent.num_faces(),
             parent.num_edges(),
             parent.num_vertices(),
         );
 
-        // No face child-vertices: ordering is edges, then vertices.
+        // No face child-vertices: ordering is edges, then vertices. Under
+        // sparse refinement, child vertices exist only for the edges and
+        // vertices of included faces.
         let face_child_vert: Vec<Index> = vec![INDEX_INVALID; num_faces];
-        let edge_child_vert: Vec<Index> = (0..num_edges as Index).collect();
-        let vert_child_vert: Vec<Index> = (0..num_verts as Index)
-            .map(|v| num_edges as Index + v)
-            .collect();
-        let num_child_verts = num_edges + num_verts;
+        let mut edge_child_vert = vec![INDEX_INVALID; num_edges];
+        let mut vert_child_vert = vec![INDEX_INVALID; num_verts];
 
-        // Each triangle yields 4 children: three corner triangles followed by
-        // the central triangle.
-        let num_child_faces = num_faces * 4;
-        let mut verts_per_face = Vec::with_capacity(num_child_faces);
-        let mut child_face_verts = Vec::with_capacity(num_child_faces * 3);
-        let mut child_face_parent = Vec::with_capacity(num_child_faces);
-        for f in 0..num_faces {
+        let mut edge_has_child = vec![false; num_edges];
+        let mut vert_has_child = vec![false; num_verts];
+        for (f, &inc) in included.iter().enumerate() {
+            if inc {
+                for &e in parent.face_edges(f) {
+                    edge_has_child[e as usize] = true;
+                }
+                for &v in parent.face_vertices(f) {
+                    vert_has_child[v as usize] = true;
+                }
+            }
+        }
+
+        let mut next = 0 as Index;
+        for (e, ecv) in edge_child_vert.iter_mut().enumerate() {
+            if edge_has_child[e] {
+                *ecv = next;
+                next += 1;
+            }
+        }
+        for (v, vcv) in vert_child_vert.iter_mut().enumerate() {
+            if vert_has_child[v] {
+                *vcv = next;
+                next += 1;
+            }
+        }
+        let num_child_verts = next as usize;
+
+        // Each triangle yields 4 children, ordered and oriented as in
+        // OpenSubdiv's `TriRefinement`: the three corner triangles keep the
+        // parent's orientation, and the central triangle is inverted:
+        //
+        //   child 0: (v0, e0, e2)     child 1: (e0, v1, e1)
+        //   child 2: (e2, e1, v2)     child 3: (e1, e2, e0)
+        //
+        // so that child `i < 3` has corner `i` at the parent's corner `i`
+        // and child 3 has each corner at the middle of the opposite edge.
+        let mut verts_per_face = Vec::new();
+        let mut child_face_verts = Vec::new();
+        let mut child_face_parent = Vec::new();
+        for (f, &inc) in included.iter().enumerate() {
+            if !inc {
+                continue;
+            }
             let fv = parent.face_vertices(f);
             let fe = parent.face_edges(f);
             debug_assert_eq!(fv.len(), 3, "tri split requires a triangulated level");
-            for i in 0..3 {
-                let prev = (i + 2) % 3;
+            let v = |i: usize| vert_child_vert[fv[i] as usize];
+            let e = |i: usize| edge_child_vert[fe[i] as usize];
+            let children = [
+                [v(0), e(0), e(2)],
+                [e(0), v(1), e(1)],
+                [e(2), e(1), v(2)],
+                [e(1), e(2), e(0)],
+            ];
+            for child in &children {
                 verts_per_face.push(3);
-                child_face_verts.extend_from_slice(&[
-                    vert_child_vert[fv[i] as usize],
-                    edge_child_vert[fe[i] as usize],
-                    edge_child_vert[fe[prev] as usize],
-                ]);
+                child_face_verts.extend_from_slice(child);
                 child_face_parent.push(f as Index);
             }
-            verts_per_face.push(3);
-            child_face_verts.extend_from_slice(&[
-                edge_child_vert[fe[0] as usize],
-                edge_child_vert[fe[1] as usize],
-                edge_child_vert[fe[2] as usize],
-            ]);
-            child_face_parent.push(f as Index);
         }
 
         let refinement = Refinement {
