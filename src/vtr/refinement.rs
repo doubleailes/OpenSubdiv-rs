@@ -80,34 +80,55 @@ impl Refinement {
         scheme: &Scheme,
         selection: Option<&[bool]>,
     ) -> Result<(Level, Refinement), TopologyError> {
-        let included = match selection {
-            None => vec![true; parent.num_faces()],
+        match selection {
+            None => Self::refine_included(parent, scheme, &vec![true; parent.num_faces()]),
             Some(selected) => {
-                assert_eq!(selected.len(), parent.num_faces());
-                // Expand the selection to its one-ring: any face sharing a
-                // vertex with a selected face is included as support.
-                let mut vertex_marked = vec![false; parent.num_vertices()];
-                for (f, &sel) in selected.iter().enumerate() {
-                    if sel {
-                        for &v in parent.face_vertices(f) {
-                            vertex_marked[v as usize] = true;
-                        }
-                    }
-                }
-                (0..parent.num_faces())
-                    .map(|f| {
-                        parent
-                            .face_vertices(f)
-                            .iter()
-                            .any(|&v| vertex_marked[v as usize])
-                    })
-                    .collect()
+                Self::refine_included(parent, scheme, &Self::expand_selection(parent, selected))
             }
-        };
+        }
+    }
 
+    /// Expand a face selection to its one-ring support: every face sharing
+    /// a vertex with a selected face is included (`SparseSelector`'s
+    /// neighborhood expansion). The result is the face mask
+    /// [`refine_included`](Self::refine_included) takes.
+    pub fn expand_selection(parent: &Level, selected: &[bool]) -> Vec<bool> {
+        assert_eq!(selected.len(), parent.num_faces());
+        let mut vertex_marked = vec![false; parent.num_vertices()];
+        for (f, &sel) in selected.iter().enumerate() {
+            if sel {
+                for &v in parent.face_vertices(f) {
+                    vertex_marked[v as usize] = true;
+                }
+            }
+        }
+        (0..parent.num_faces())
+            .map(|f| {
+                parent
+                    .face_vertices(f)
+                    .iter()
+                    .any(|&v| vertex_marked[v as usize])
+            })
+            .collect()
+    }
+
+    /// Refine exactly the faces flagged in `included` (one flag per face
+    /// of `parent`), with no further expansion. The caller is responsible
+    /// for including the support faces the refined faces' children need
+    /// (see [`expand_selection`](Self::expand_selection)); passing one
+    /// mask to several levels that mirror each other's faces — the
+    /// geometry and its face-varying value meshes — keeps their child
+    /// faces in lockstep even where the meshes' vertex connectivity
+    /// differs (as it does across face-varying seams).
+    pub fn refine_included(
+        parent: &Level,
+        scheme: &Scheme,
+        included: &[bool],
+    ) -> Result<(Level, Refinement), TopologyError> {
+        assert_eq!(included.len(), parent.num_faces());
         match scheme.scheme_type().topological_split_type() {
-            Split::ToQuads => Self::refine_quads(parent, scheme, &included),
-            Split::ToTris => Self::refine_tris(parent, scheme, &included),
+            Split::ToQuads => Self::refine_quads(parent, scheme, included),
+            Split::ToTris => Self::refine_tris(parent, scheme, included),
             Split::Hybrid => unimplemented!("hybrid splits are not used by any scheme"),
         }
     }

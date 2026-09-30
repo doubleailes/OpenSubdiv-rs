@@ -28,7 +28,8 @@ impl UniformOptions {
 #[derive(Debug, Clone, Copy)]
 pub struct AdaptiveOptions {
     /// The maximum level of refinement applied to isolate irregular
-    /// features (`isolationLevel`).
+    /// features (`isolationLevel`), capped at
+    /// [`MAX_ISOLATION_LEVEL`](Self::MAX_ISOLATION_LEVEL).
     pub isolation_level: usize,
     /// Represent regular faces along a semi-sharp crease as single-crease
     /// patches instead of isolating the crease (`useSingleCreasePatch`).
@@ -45,7 +46,16 @@ pub struct AdaptiveOptions {
 }
 
 impl AdaptiveOptions {
-    /// Isolate irregular features up to `isolation_level` levels deep.
+    /// The deepest isolation level [`TopologyRefiner::refine_adaptive`]
+    /// applies; larger requests are clamped to it. As in OpenSubdiv
+    /// (whose `isolationLevel` is documented for `0..=10`), features not
+    /// resolved by then are capped with Gregory patches, which also keeps
+    /// every [`super::PatchParam::depth`] well within the range the
+    /// parametric scale `2^depth` is computed for.
+    pub const MAX_ISOLATION_LEVEL: usize = 10;
+
+    /// Isolate irregular features up to `isolation_level` levels deep
+    /// (at most [`MAX_ISOLATION_LEVEL`](Self::MAX_ISOLATION_LEVEL)).
     pub fn new(isolation_level: usize) -> Self {
         Self {
             isolation_level,
@@ -300,6 +310,9 @@ impl TopologyRefiner {
     /// above 0 are sparse: memory grows with the mesh's irregular features,
     /// not with `4^level`.
     ///
+    /// Isolation stops at [`AdaptiveOptions::MAX_ISOLATION_LEVEL`] however
+    /// deep a level is requested.
+    ///
     /// Patches for an adaptively refined mesh live at mixed depths — build
     /// a [`super::PatchTable`] to evaluate the limit surface.
     /// [`super::PrimvarRefiner::interpolate`] works level by level as
@@ -320,8 +333,11 @@ impl TopologyRefiner {
         );
         self.adaptive = true;
         self.single_crease_patch = options.use_single_crease_patch;
+        let isolation_level = options
+            .isolation_level
+            .min(AdaptiveOptions::MAX_ISOLATION_LEVEL);
 
-        while self.max_level() < options.isolation_level {
+        while self.max_level() < isolation_level {
             let level_index = self.max_level();
             let level = self.levels.last().unwrap();
 
@@ -349,16 +365,19 @@ impl TopologyRefiner {
                 break;
             }
 
-            let (child, refinement) = Refinement::refine_selected(
-                self.levels.last().unwrap(),
-                &self.scheme,
-                Some(&selected),
-            )
-            .expect("refined topology is always internally consistent");
+            // The selection is expanded to its one-ring support once, on
+            // the geometry, and that mask refines the face-varying channels
+            // too: their value meshes mirror the geometry's faces but not
+            // its vertex connectivity (seams split vertices), so expanding
+            // on each mesh separately would refine different faces.
+            let included = Refinement::expand_selection(level, &selected);
+            let (child, refinement) =
+                Refinement::refine_included(self.levels.last().unwrap(), &self.scheme, &included)
+                    .expect("refined topology is always internally consistent");
             self.levels.push(child);
             self.refinements.push(refinement);
             for channel in &mut self.fvar_channels {
-                channel.refine_once(Some(&selected));
+                channel.refine_once(Some(&included));
             }
             self.selections.push(selected);
         }
