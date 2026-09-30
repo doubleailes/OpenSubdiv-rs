@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Non-manifold edges are made infinitely sharp when the base level is
   built, and non-manifold vertices infinitely sharp unless they lie on a
-  crease of exactly two non-manifold edges, as OpenSubdiv does
+  crease of exactly two non-manifold edges bounding every fan of faces
+  around them, as OpenSubdiv does
   (`applyComponentTagsAndBoundarySharpness`). This changes refinement and
   limit positions around non-manifold features, which previously followed
   the smooth rules.

@@ -438,37 +438,89 @@ impl Level {
                 _ => return true,
             }
         }
-        let counts_ok = (boundary_edges == 0 && edges.len() == faces.len())
-            || (boundary_edges == 2 && edges.len() == faces.len() + 1);
         if faces.is_empty() {
             return false; // an isolated vertex
         }
-        if !counts_ok {
-            return true;
-        }
+        let counts_ok = (boundary_edges == 0 && edges.len() == faces.len())
+            || (boundary_edges == 2 && edges.len() == faces.len() + 1);
+        !counts_ok || self.vertex_fans(vertex).1 > 1
+    }
 
-        // Connectivity: every face must be reachable from the first across
-        // the (manifold) edges incident the vertex.
-        let mut reached = vec![false; faces.len()];
-        let mut stack = vec![0usize];
-        reached[0] = true;
-        while let Some(i) = stack.pop() {
-            let face = faces[i] as usize;
-            for &e in self.face_edges(face) {
-                if !edges.contains(&e) {
-                    continue;
-                }
-                for &other in self.edge_faces(e as usize) {
-                    if let Some(j) = faces.iter().position(|&f| f == other) {
-                        if !reached[j] {
-                            reached[j] = true;
-                            stack.push(j);
+    /// The edges of `face` incident `vertex` (two per occurrence of the
+    /// vertex in the face).
+    fn face_edges_at_vertex(&self, face: usize, vertex: Index) -> impl Iterator<Item = Index> + '_ {
+        let fv = self.face_vertices(face);
+        let fe = self.face_edges(face);
+        let n = fv.len();
+        (0..n)
+            .filter(move |&i| fv[i] == vertex)
+            .flat_map(move |i| [fe[i], fe[(i + n - 1) % n]])
+    }
+
+    /// Partition the faces incident `vertex` into *fans*: sets of faces
+    /// connected across manifold (two-face) edges incident the vertex.
+    /// Returns the fan of each entry of [`Self::vertex_faces`] and the
+    /// number of fans. Linear in the size of the vertex's neighborhood.
+    fn vertex_fans(&self, vertex: usize) -> (Vec<usize>, usize) {
+        let faces = self.vertex_faces(vertex);
+        let slot: HashMap<Index, usize> = faces.iter().enumerate().map(|(i, &f)| (f, i)).collect();
+        let mut fan = vec![usize::MAX; faces.len()];
+        let mut num_fans = 0;
+        let mut stack = Vec::new();
+        for seed in 0..faces.len() {
+            if fan[seed] != usize::MAX {
+                continue;
+            }
+            fan[seed] = num_fans;
+            stack.push(seed);
+            while let Some(i) = stack.pop() {
+                for e in self.face_edges_at_vertex(faces[i] as usize, vertex as Index) {
+                    let edge_faces = self.edge_faces(e as usize);
+                    if edge_faces.len() != 2 {
+                        continue;
+                    }
+                    for &other in edge_faces {
+                        if let Some(&j) = slot.get(&other) {
+                            if fan[j] == usize::MAX {
+                                fan[j] = num_fans;
+                                stack.push(j);
+                            }
                         }
                     }
                 }
             }
+            num_fans += 1;
         }
-        reached.iter().any(|&r| !r)
+        (fan, num_fans)
+    }
+
+    /// Does non-manifold `vertex` lie on a *non-manifold crease*: exactly
+    /// two non-manifold edges, no boundary edges, and every fan of faces
+    /// around it bounded by those two edges? Only then do the crease rules
+    /// along the two edges describe the limit of every fan; a vertex also
+    /// shared by a fan away from the crease must be pinned instead.
+    fn is_vertex_non_manifold_crease(&self, vertex: usize) -> bool {
+        let mut crease = Vec::with_capacity(2);
+        for &e in self.vertex_edges(vertex) {
+            match self.edge_faces(e as usize).len() {
+                2 => {}
+                n if n > 2 => crease.push(e),
+                _ => return false,
+            }
+        }
+        if crease.len() != 2 {
+            return false;
+        }
+        let (fan, num_fans) = self.vertex_fans(vertex);
+        let mut touches = vec![[false; 2]; num_fans];
+        for (i, &f) in self.vertex_faces(vertex).iter().enumerate() {
+            for e in self.face_edges_at_vertex(f as usize, vertex as Index) {
+                if let Some(k) = crease.iter().position(|&c| c == e) {
+                    touches[fan[i]][k] = true;
+                }
+            }
+        }
+        touches.iter().all(|&[a, b]| a && b)
     }
 
     /// Is `vertex` on a boundary (incident a boundary edge)?
@@ -531,8 +583,9 @@ impl Level {
     /// As in OpenSubdiv, non-manifold edges are made infinitely sharp —
     /// the surface is split along them like along a boundary — and every
     /// non-manifold vertex is made infinitely sharp too, except one lying
-    /// on a non-manifold crease (exactly two non-manifold edges), which
-    /// follows the crease rule along them. Refinement propagates both to
+    /// on a non-manifold crease (exactly two non-manifold edges bounding
+    /// every fan of faces around it), which follows the crease rule along
+    /// them. Refinement propagates both to
     /// the children, so every level stays consistent.
     pub fn sharpen_boundaries(&mut self, crease: &Crease) {
         for e in 0..self.num_edges() {
@@ -546,15 +599,8 @@ impl Level {
             if self.is_vertex_corner(v) {
                 self.vert_sharpness[v] =
                     crease.sharpen_boundary_corner_vertex(self.vert_sharpness[v]);
-            } else if self.is_vertex_non_manifold(v) {
-                let non_manifold_edges = self
-                    .vertex_edges(v)
-                    .iter()
-                    .filter(|&&e| self.is_edge_non_manifold(e as usize))
-                    .count();
-                if non_manifold_edges != 2 {
-                    self.vert_sharpness[v] = SHARPNESS_INFINITE;
-                }
+            } else if self.is_vertex_non_manifold(v) && !self.is_vertex_non_manifold_crease(v) {
+                self.vert_sharpness[v] = SHARPNESS_INFINITE;
             }
         }
     }
@@ -648,6 +694,58 @@ mod tests {
         assert_eq!(level.vertex_sharpness(1), 0.0);
         assert!(Crease::is_infinite(level.vertex_sharpness(0)));
         assert!(Crease::is_infinite(level.vertex_sharpness(2)));
+    }
+
+    #[test]
+    fn non_manifold_crease_vertex_with_a_separate_fan_is_pinned() {
+        // The three-fin seam, plus a closed tetrahedron touching only the
+        // middle seam vertex: that vertex's two non-manifold edges do not
+        // bound the tetrahedron's fan, so it is pinned.
+        let mut face_verts = Vec::new();
+        let mut verts_per_face = vec![4usize; 6];
+        for k in 0..3 {
+            let b = 3 + 3 * k;
+            face_verts.extend_from_slice(&[0, 1, b + 1, b, 1, 2, b + 2, b + 1]);
+        }
+        face_verts.extend_from_slice(&[1, 12, 13, 1, 13, 14, 1, 14, 12, 12, 14, 13]);
+        verts_per_face.extend_from_slice(&[3; 4]);
+        let mut level = Level::from_face_vertices(15, &verts_per_face, &face_verts).unwrap();
+        assert!(level.is_vertex_non_manifold(1));
+        assert!(!level.is_vertex_non_manifold(12));
+        level.sharpen_boundaries(&Crease::new(crate::sdc::Options::default()));
+        assert!(Crease::is_infinite(level.vertex_sharpness(1)));
+        assert_eq!(level.vertex_sharpness(12), 0.0);
+    }
+
+    #[test]
+    fn high_valence_vertices_are_classified() {
+        // A closed fan of 4000 triangles around vertex 0 (a flattened
+        // double cone), and the same fan split into two halves sharing only
+        // the pole: fan detection stays linear in the valence.
+        let n = 4000u32;
+        let mut face_verts = Vec::new();
+        for i in 0..n {
+            face_verts.extend_from_slice(&[0, 1 + i, 1 + (i + 1) % n]);
+        }
+        let level =
+            Level::from_face_vertices(1 + n as usize, &vec![3; n as usize], &face_verts).unwrap();
+        assert!(!level.is_vertex_non_manifold(0));
+
+        // Two open fans sharing the pole: a bow tie.
+        let mut face_verts = Vec::new();
+        for half in 0..2 {
+            let b = 1 + half * (n + 1);
+            for i in 0..n {
+                face_verts.extend_from_slice(&[0, b + i, b + i + 1]);
+            }
+        }
+        let level = Level::from_face_vertices(
+            1 + 2 * (n as usize + 1),
+            &vec![3; 2 * n as usize],
+            &face_verts,
+        )
+        .unwrap();
+        assert!(level.is_vertex_non_manifold(0));
     }
 
     #[test]
