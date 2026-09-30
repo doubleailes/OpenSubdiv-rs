@@ -44,10 +44,12 @@
 //!
 //! Semi-sharp creases still unresolved at the isolation level are ignored
 //! (their vertices are treated as smooth, or as darts), as OpenSubdiv does.
-//! Only non-manifold neighborhoods and unsharpened boundaries
-//! (`VtxBoundaryInterpolation::None`, whose smooth boundary rules have no
-//! Gregory counterpart) are left to the bilinear fallback of
-//! [`super::PatchTableFactory`].
+//! Non-manifold neighborhoods need no special case: their edges and
+//! vertices are made infinitely sharp when the base level is built (as in
+//! OpenSubdiv), so each face is capped over its own manifold span. Only
+//! unsharpened boundaries (`VtxBoundaryInterpolation::None`, whose smooth
+//! boundary rules have no Gregory counterpart) are left to the bilinear
+//! fallback of [`super::PatchTableFactory`].
 
 use crate::sdc::{self, Crease, Rule};
 use crate::vtr::Level;
@@ -174,8 +176,14 @@ fn other_edge_at_vertex(level: &Level, face: Index, vertex: Index, edge: Index) 
 
 /// Identify the span of quads around corner `corner` of `face`
 /// (`identifyManifoldCornerSpan`), treating infinitely sharp edges as
-/// singular when `inf_sharp_singular` is set. `None` for non-manifold
-/// neighborhoods and rings containing non-quad faces.
+/// singular when `inf_sharp_singular` is set. `None` when the span contains
+/// non-quad faces.
+///
+/// Non-manifold vertices need no special case: the walk never crosses a
+/// non-manifold edge, so the span is the manifold fan of faces containing
+/// the patch face, as in the reference. (Base-level sharpening makes every
+/// non-manifold vertex infinitely sharp or a crease along its non-manifold
+/// edges, so its other fans do not affect the limit surface over this one.)
 pub(super) fn corner_span(
     level: &Level,
     face: usize,
@@ -185,28 +193,7 @@ pub(super) fn corner_span(
     let fv = level.face_vertices(face);
     let fe = level.face_edges(face);
     let vertex = fv[corner];
-    let v = vertex as usize;
-
-    // Manifold check: every incident edge has at most two faces, and the
-    // vertex is either interior (as many edges as faces) or a single
-    // boundary fan (one more edge than faces, two of them boundary edges).
-    let vertex_edges = level.vertex_edges(v);
-    let num_faces = level.vertex_faces(v).len();
-    if vertex_edges
-        .iter()
-        .any(|&e| level.is_edge_non_manifold(e as usize))
-    {
-        return None;
-    }
-    let boundary_edges = vertex_edges
-        .iter()
-        .filter(|&&e| level.is_edge_boundary(e as usize))
-        .count();
-    let manifold = (vertex_edges.len() == num_faces && boundary_edges == 0)
-        || (vertex_edges.len() == num_faces + 1 && boundary_edges == 2);
-    if !manifold {
-        return None;
-    }
+    let num_faces = level.vertex_faces(vertex as usize).len();
 
     let singular = |e: Index| is_edge_singular(level, e, inf_sharp_singular);
     let face = face as Index;
@@ -266,18 +253,6 @@ pub(super) fn corner_span(
         if faces.len() > num_faces {
             return None;
         }
-    }
-    // The vertex's faces must form a single fan: a second fan sharing only
-    // the vertex (a non-manifold "bow tie") passes the counts above but is
-    // never reached by the walk. A span cut short by crease edges is
-    // checked against the walk that ignores them.
-    let connected = if periodic || !inf_sharp_singular {
-        faces.len() == num_faces
-    } else {
-        corner_span(level, face as usize, corner, false).is_some()
-    };
-    if !connected {
-        return None;
     }
     let face_in_span = faces.iter().position(|&f| f == face)?;
     Some(CornerSpan {
@@ -460,8 +435,8 @@ fn irregular_face_point(level: &Level, near: &Corner, far: &Corner, plus: bool) 
 }
 
 /// Build the 20 Gregory control-point stencils for `face`
-/// (`GregoryConverter::Convert`), or `None` when a corner neighborhood is
-/// non-manifold or contains non-quad faces.
+/// (`GregoryConverter::Convert`), or `None` when a corner neighborhood
+/// contains non-quad faces or lies on an unsharpened boundary.
 pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryPoints>> {
     let fv = level.face_vertices(face);
     if fv.len() != 4 {
@@ -862,7 +837,7 @@ mod tests {
             let param = table.patch_param(patch);
             assert_eq!(param.depth, 0);
             assert_eq!(param.rotation, 0);
-            let points = build(level, face).expect("every manifold quad face builds");
+            let points = build(level, face).expect("every sharpened quad face builds");
 
             for &(s, t) in &samples {
                 let (w, ws, wt) = evaluate_basis(s, t);

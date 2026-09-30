@@ -30,16 +30,20 @@
 //!   weights at evaluation time — mathematically equivalent to OpenSubdiv's
 //!   boundary/corner basis masks, with infinitely sharp creases treated as
 //!   boundaries (OpenSubdiv's `useInfSharpPatch`).
-//! * [`PatchType::GregoryBasis`] — every other manifold face at its
-//!   isolation level is capped with a Gregory patch (see
-//!   [`super::gregory`]): extraordinary vertices, irregular boundary and
-//!   crease corners, sharp corners and darts. The 20 derived points give
-//!   corner limit-point interpolation, exact C0 boundaries and approximate
-//!   G1 smoothness, as OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
-//! * [`PatchType::Quads`] — non-manifold neighborhoods, irregular faces on
-//!   unsharpened boundaries (`VtxBoundaryInterpolation::None`), and every
-//!   face of the Bilinear scheme (whose mesh is its own limit surface) fall
-//!   back to bilinear interpolation of the refined face.
+//! * [`PatchType::GregoryBasis`] — every other face at its isolation
+//!   level is capped with a Gregory patch (see [`super::gregory`]):
+//!   extraordinary vertices, irregular boundary and crease corners, sharp
+//!   corners and darts. The 20 derived points give corner limit-point
+//!   interpolation, exact C0 boundaries and approximate G1 smoothness, as
+//!   OpenSubdiv's `ENDCAP_GREGORY_BASIS` does.
+//! * Non-manifold edges and vertices are infinitely sharp, as in
+//!   OpenSubdiv, so the faces around them are patched over their own
+//!   manifold span like any other: regular where that span is regular,
+//!   Gregory caps elsewhere.
+//! * [`PatchType::Quads`] — irregular faces on unsharpened boundaries
+//!   (`VtxBoundaryInterpolation::None`), and every face of the Bilinear
+//!   scheme (whose mesh is its own limit surface) fall back to bilinear
+//!   interpolation of the refined face.
 //!
 //! Control-vertex indices refer to the **concatenation of every level's
 //! vertices**, base level first: evaluate patches against the base values
@@ -474,9 +478,9 @@ impl PatchTableFactory {
                         }
                         PatchKind::Regular(cvs)
                     } else if let Some(mut points) = gregory::build(inner, face) {
-                        // Irregular manifold neighborhood (extraordinary,
-                        // boundary, crease, sharp or dart corners): Gregory
-                        // end cap.
+                        // Irregular neighborhood (extraordinary, boundary,
+                        // crease, sharp, dart or non-manifold corners):
+                        // Gregory end cap.
                         for point in points.iter_mut() {
                             for (cv, _) in point.0.iter_mut() {
                                 *cv += offset;
@@ -484,8 +488,8 @@ impl PatchTableFactory {
                         }
                         PatchKind::Gregory(points)
                     } else {
-                        // Non-manifold neighborhood or unsharpened boundary:
-                        // bilinear fallback.
+                        // Unsharpened boundary or non-quad ring: bilinear
+                        // fallback.
                         PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
                     }
                 } else {

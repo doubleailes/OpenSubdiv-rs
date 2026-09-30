@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::sdc::Crease;
+use crate::sdc::{Crease, SHARPNESS_INFINITE};
 use crate::{Index, INDEX_INVALID};
 
 /// Errors reported when constructing or validating topology.
@@ -421,6 +421,56 @@ impl Level {
         self.edge_faces(edge).len() > 2
     }
 
+    /// Is `vertex` non-manifold: incident a non-manifold edge, or whose
+    /// incident faces do not form a single fan — a closed ring (as many
+    /// edges as faces, none on a boundary) or one open fan bounded by two
+    /// boundary edges? Vertices shared by otherwise separate fans ("bow
+    /// ties") and dangling edges are non-manifold.
+    pub fn is_vertex_non_manifold(&self, vertex: usize) -> bool {
+        let edges = self.vertex_edges(vertex);
+        let faces = self.vertex_faces(vertex);
+        let mut boundary_edges = 0;
+        for &e in edges {
+            match self.edge_faces(e as usize).len() {
+                0 => return true,
+                1 => boundary_edges += 1,
+                2 => {}
+                _ => return true,
+            }
+        }
+        let counts_ok = (boundary_edges == 0 && edges.len() == faces.len())
+            || (boundary_edges == 2 && edges.len() == faces.len() + 1);
+        if faces.is_empty() {
+            return false; // an isolated vertex
+        }
+        if !counts_ok {
+            return true;
+        }
+
+        // Connectivity: every face must be reachable from the first across
+        // the (manifold) edges incident the vertex.
+        let mut reached = vec![false; faces.len()];
+        let mut stack = vec![0usize];
+        reached[0] = true;
+        while let Some(i) = stack.pop() {
+            let face = faces[i] as usize;
+            for &e in self.face_edges(face) {
+                if !edges.contains(&e) {
+                    continue;
+                }
+                for &other in self.edge_faces(e as usize) {
+                    if let Some(j) = faces.iter().position(|&f| f == other) {
+                        if !reached[j] {
+                            reached[j] = true;
+                            stack.push(j);
+                        }
+                    }
+                }
+            }
+        }
+        reached.iter().any(|&r| !r)
+    }
+
     /// Is `vertex` on a boundary (incident a boundary edge)?
     pub fn is_vertex_boundary(&self, vertex: usize) -> bool {
         self.vertex_edges(vertex)
@@ -472,19 +522,39 @@ impl Level {
     }
 
     /// Apply the boundary-interpolation rules by sharpening boundary edges
-    /// (and, for `EdgeAndCorner`, pinning boundary corner vertices). Called
-    /// once per level after construction, mirroring how Far applies
-    /// `Sdc::Options::VtxBoundaryInterpolation`.
+    /// (and, for `EdgeAndCorner`, pinning boundary corner vertices), and
+    /// sharpen non-manifold features. Called once on the base level after
+    /// construction, mirroring how Far applies
+    /// `Sdc::Options::VtxBoundaryInterpolation`
+    /// (`applyComponentTagsAndBoundarySharpness`).
+    ///
+    /// As in OpenSubdiv, non-manifold edges are made infinitely sharp —
+    /// the surface is split along them like along a boundary — and every
+    /// non-manifold vertex is made infinitely sharp too, except one lying
+    /// on a non-manifold crease (exactly two non-manifold edges), which
+    /// follows the crease rule along them. Refinement propagates both to
+    /// the children, so every level stays consistent.
     pub fn sharpen_boundaries(&mut self, crease: &Crease) {
         for e in 0..self.num_edges() {
             if self.is_edge_boundary(e) {
                 self.edge_sharpness[e] = crease.sharpen_boundary_edge(self.edge_sharpness[e]);
+            } else if self.is_edge_non_manifold(e) {
+                self.edge_sharpness[e] = SHARPNESS_INFINITE;
             }
         }
         for v in 0..self.num_vertices() {
             if self.is_vertex_corner(v) {
                 self.vert_sharpness[v] =
                     crease.sharpen_boundary_corner_vertex(self.vert_sharpness[v]);
+            } else if self.is_vertex_non_manifold(v) {
+                let non_manifold_edges = self
+                    .vertex_edges(v)
+                    .iter()
+                    .filter(|&&e| self.is_edge_non_manifold(e as usize))
+                    .count();
+                if non_manifold_edges != 2 {
+                    self.vert_sharpness[v] = SHARPNESS_INFINITE;
+                }
             }
         }
     }
@@ -530,6 +600,54 @@ mod tests {
     /// ```
     fn quad_and_tri() -> Level {
         Level::from_face_vertices(5, &[4, 3], &[0, 1, 2, 3, 1, 4, 2]).unwrap()
+    }
+
+    #[test]
+    fn non_manifold_features_are_sharpened() {
+        // Three quads sharing edge 0-1 (a "T" fin), and a fourth quad
+        // touching the fin only at vertex 3 (a bow tie).
+        let mut level = Level::from_face_vertices(
+            11,
+            &[4, 4, 4, 4],
+            &[0, 1, 2, 3, 1, 0, 4, 5, 0, 1, 6, 7, 3, 8, 9, 10],
+        )
+        .unwrap();
+        let seam = level.find_edge(0, 1).unwrap() as usize;
+        assert!(level.is_edge_non_manifold(seam));
+        for v in [0, 1, 3] {
+            assert!(level.is_vertex_non_manifold(v), "vertex {v}");
+        }
+        for v in [2, 4, 5, 6, 7, 8] {
+            assert!(!level.is_vertex_non_manifold(v), "vertex {v}");
+        }
+        // The quad and triangle of the helper mesh are manifold throughout.
+        let manifold = quad_and_tri();
+        assert!((0..5).all(|v| !manifold.is_vertex_non_manifold(v)));
+
+        level.sharpen_boundaries(&Crease::new(crate::sdc::Options::default()));
+        assert!(Crease::is_infinite(level.edge_sharpness(seam)));
+        for v in [0, 1, 3] {
+            assert!(Crease::is_infinite(level.vertex_sharpness(v)), "vertex {v}");
+        }
+        assert_eq!(level.vertex_sharpness(2), 0.0);
+    }
+
+    #[test]
+    fn non_manifold_crease_vertex_is_not_pinned() {
+        // Three 2x1 fins sharing a seam 0-1-2: the middle seam vertex lies
+        // on a crease of exactly two non-manifold edges and keeps its
+        // sharpness; the seam ends are pinned.
+        let mut face_verts = Vec::new();
+        for k in 0..3 {
+            let b = 3 + 3 * k;
+            face_verts.extend_from_slice(&[0, 1, b + 1, b, 1, 2, b + 2, b + 1]);
+        }
+        let mut level = Level::from_face_vertices(12, &[4; 6], &face_verts).unwrap();
+        assert!(level.is_vertex_non_manifold(1));
+        level.sharpen_boundaries(&Crease::new(crate::sdc::Options::default()));
+        assert_eq!(level.vertex_sharpness(1), 0.0);
+        assert!(Crease::is_infinite(level.vertex_sharpness(0)));
+        assert!(Crease::is_infinite(level.vertex_sharpness(2)));
     }
 
     #[test]

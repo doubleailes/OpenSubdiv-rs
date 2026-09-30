@@ -658,11 +658,12 @@ fn smooth_boundaries_keep_the_bilinear_fallback() {
 }
 
 #[test]
-fn bow_tie_vertex_falls_back_consistently() {
+fn bow_tie_vertex_is_capped_consistently() {
     // A closed fan of four quads and an open fan of two quads sharing only
-    // one vertex: the vertex is non-manifold, so every face at it must take
-    // the same (bilinear) fallback rather than mixing Gregory caps on one
-    // fan with bilinear quads on the other.
+    // one vertex: the vertex is non-manifold, so — as in OpenSubdiv — it is
+    // made infinitely sharp, and every face at it gets a Gregory cap over
+    // its own fan whose corner interpolates the vertex, rather than mixing
+    // caps on one fan with bilinear quads on the other.
     let verts_per_face = [4usize; 6];
     let face_verts: [u32; 24] = [
         0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7, // 2x2 grid around vertex 4
@@ -680,6 +681,9 @@ fn bow_tie_vertex_falls_back_consistently() {
     ]);
     let descriptor = TopologyDescriptor::new(14, &verts_per_face, &face_verts);
     let surface = Surface::adaptive(descriptor, sdc::Options::default(), 2, &positions);
+    assert!(surface.refiner.level(0).vertex_sharpness(4) >= sdc::SHARPNESS_INFINITE);
+    assert_eq!(count(&surface.table, PatchType::Quads), 0);
+    assert_caps_are_affine(&surface);
 
     let level = surface.refiner.level(2);
     let child = |v: u32| -> u32 {
@@ -696,12 +700,25 @@ fn bow_tie_vertex_falls_back_consistently() {
     assert_eq!(level.vertex_faces(shared as usize).len(), 6);
     let mut at_shared = 0;
     for p in 0..surface.table.num_patches() {
-        if surface.table.patch_param(p).depth != 2 {
+        let param = surface.table.patch_param(p);
+        if param.depth != 2 {
             continue;
         }
         let face = surface.table.patch_face(p) as usize;
         if level.face_vertices(face).contains(&shared) {
-            assert_eq!(surface.table.patch_type(p), PatchType::Quads);
+            assert_eq!(surface.table.patch_type(p), PatchType::GregoryBasis);
+            // One corner of the cap is pinned to the sharp vertex.
+            let pinned = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+                .iter()
+                .map(|&(s, t)| {
+                    let (u, v) = param.unnormalize(s, t);
+                    distance(surface.evaluate(p, u, v), positions[4])
+                })
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                pinned < 1e-5,
+                "patch {p}: corner misses the vertex by {pinned}"
+            );
             at_shared += 1;
         }
     }

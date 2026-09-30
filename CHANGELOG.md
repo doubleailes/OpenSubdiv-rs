@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Patches around non-manifold features
+  ([#10](https://github.com/doubleailes/OpenSubdiv-rs/issues/10)): faces
+  incident non-manifold edges or vertices are now patched over their own
+  manifold span — regular B-spline patches where the span is regular,
+  Gregory caps elsewhere — instead of falling back to bilinear quads.
+  `PatchType::Quads` now only appears for irregular faces on unsharpened
+  (`VtxBoundaryInterpolation::None`) boundaries and the Bilinear scheme.
+- `vtr::Level::is_vertex_non_manifold`.
+
+### Changed
+
+- Non-manifold edges are made infinitely sharp when the base level is
+  built, and non-manifold vertices infinitely sharp unless they lie on a
+  crease of exactly two non-manifold edges, as OpenSubdiv does
+  (`applyComponentTagsAndBoundarySharpness`). This changes refinement and
+  limit positions around non-manifold features, which previously followed
+  the smooth rules.
+
 ## [0.2.0] - 2026-09-30
 
 ### Added
