@@ -1,25 +1,51 @@
-//! Gregory-basis end-cap patches for faces around extraordinary vertices.
+//! Gregory-basis end-cap patches for irregular faces.
 //!
-//! Port of the role of `opensubdiv/far/gregoryBasis.{h,cpp}` /
-//! `endCapGregoryBasisPatchFactory`: where the Catmull-Clark limit surface
-//! is not polynomial (faces with an extraordinary corner), the surface is
-//! approximated by a *Gregory patch* — 20 control points forming a bicubic
+//! Port of the role of `opensubdiv/far/catmarkPatchBuilder.cpp`
+//! (`CatmarkLimits` and `GregoryConverter`): where the Catmull-Clark limit
+//! surface over a face is not a bicubic B-spline — a face with an
+//! extraordinary corner, a corner on an irregular boundary or infinitely
+//! sharp crease, a sharp (pinned) corner, or a dart — the surface is
+//! approximated by a *Gregory patch*: 20 control points forming a bicubic
 //! Bézier patch whose four interior points are rational blends, giving
 //! corner limit-point interpolation, exact C0 boundaries with neighboring
-//! patches, and approximate G1 smoothness.
+//! patches, and approximate G1 smoothness. This is OpenSubdiv's
+//! `ENDCAP_GREGORY_BASIS` end cap, including its treatment of infinitely
+//! sharp features (`useInfSharpPatch`).
 //!
-//! The construction follows Loop, Schaefer, Nießner & Castaño,
-//! *"Approximating Subdivision Surfaces with Gregory Patches for Hardware
-//! Tessellation"* (the basis OpenSubdiv's end caps build on). Each of the
-//! 20 points is stored as a sparse stencil on the refined mesh's vertices,
-//! so evaluation stays weight-based like every other patch type. On a
-//! fully regular neighborhood the construction degenerates to the exact
-//! bicubic B-spline patch — a property the unit tests verify, pinning down
-//! every coefficient.
+//! Each of the 20 points is stored as a sparse stencil on the refined
+//! mesh's vertices, so evaluation stays weight-based like every other patch
+//! type. The coefficients are OpenSubdiv's own (they predate and differ
+//! slightly from Loop, Schaefer, Nießner & Castaño's published
+//! construction): on a fully regular neighborhood — interior, boundary,
+//! pinned corner or infinitely sharp crease alike — the construction
+//! degenerates to the exact bicubic B-spline patch, a property the unit
+//! tests verify for arbitrary control data, pinning down every coefficient.
 //!
-//! Only *smooth interior* irregular neighborhoods are handled here;
-//! boundary or creased irregular faces keep the bilinear fallback.
+//! ## Corner classification
+//!
+//! Following the reference, each corner of the face is described by the
+//! *span* of faces around its vertex that contains the patch face: the
+//! fan bounded by *singular* edges (boundary edges, non-manifold edges and
+//! — unless the vertex is a dart — infinitely sharp creases), or the full
+//! periodic one-ring when no singular edge is met. A corner is then
+//!
+//! * **regular** (2 faces on a boundary/crease, 4 faces interior) — its
+//!   points are those of the B-spline patch;
+//! * **smooth interior** — limit point and scaled limit tangents of the
+//!   full ring (`CatmarkLimits::ComputeInteriorPointWeights`);
+//! * **smooth boundary/crease** — limit point on the boundary curve, one
+//!   edge point along the boundary curve (two non-zero weights) and one
+//!   along the interior tangent (`ComputeBoundaryPointWeights`);
+//! * **sharp** (infinitely sharp vertex, or three or more infinitely sharp
+//!   edges) — the corner point is the vertex itself, and the edge points
+//!   lie a third of the way along the face's edges;
+//! * a **smooth corner** of a single face — the crease limit rules of its
+//!   two boundary edges.
+//!
+//! Only non-manifold neighborhoods are left to the bilinear fallback of
+//! [`super::PatchTableFactory`].
 
+use crate::sdc::{self, Crease, Rule};
 use crate::vtr::Level;
 use crate::Index;
 
@@ -28,6 +54,14 @@ use crate::Index;
 pub(crate) struct SparsePoint(pub(crate) Vec<(Index, f32)>);
 
 impl SparsePoint {
+    fn of(entries: &[(Index, f32)]) -> SparsePoint {
+        let mut p = SparsePoint::default();
+        for &(i, w) in entries {
+            p.add(i, w);
+        }
+        p
+    }
+
     fn add(&mut self, index: Index, weight: f32) {
         match self.0.iter_mut().find(|(i, _)| *i == index) {
             Some((_, w)) => *w += weight,
@@ -50,41 +84,62 @@ impl SparsePoint {
 /// `[P, E+, E-, F+, F-]` (matching OpenSubdiv's Gregory-basis layout).
 pub(crate) type GregoryPoints = [SparsePoint; 20];
 
-/// The ordered one-ring around one corner of a quad: `edges[j]` are the
-/// incident edges in counter-clockwise order starting from the edge toward
-/// the face's next corner, and `faces[j]` sits between `edges[j]` and
-/// `edges[j+1]` (`faces[0]` is the patch face itself).
-struct CornerRing {
-    vertex: Index,
-    edges: Vec<Index>,
-    faces: Vec<Index>,
+// ----------------------------------------------------------------------
+//  Corner spans
+// ----------------------------------------------------------------------
+
+/// Is `edge` a wall for the neighborhood of a patch: a boundary or
+/// non-manifold edge, or — when `inf_sharp` is set — an infinitely sharp
+/// crease (which the limit surface treats exactly like a boundary)?
+pub(super) fn is_edge_singular(level: &Level, edge: Index, inf_sharp: bool) -> bool {
+    let e = edge as usize;
+    level.edge_faces(e).len() != 2 || (inf_sharp && Crease::is_infinite(level.edge_sharpness(e)))
 }
 
-impl CornerRing {
+/// The fan of faces around one corner of a quad that contains the patch
+/// face, bounded by singular edges (`Vtr::Level::VSpan` plus the ring
+/// ordering of `Far::SourcePatch`).
+///
+/// `edges` are the incident edges in counter-clockwise order and `faces[i]`
+/// sits between `edges[i]` and `edges[i + 1]`. For a periodic span
+/// (`boundary == false`) `edges[0]` is the edge toward the face's next
+/// corner, `faces[0]` is the patch face and `edges.len() == faces.len()`.
+/// For a bounded span `edges[0]` is the leading singular edge (the one
+/// reached walking clockwise from the patch face), `edges` closes with the
+/// trailing singular edge — the same edge again when only one singular
+/// edge exists — and `edges.len() == faces.len() + 1`.
+pub(super) struct CornerSpan {
+    pub(super) vertex: Index,
+    pub(super) edges: Vec<Index>,
+    pub(super) faces: Vec<Index>,
+    /// Index of the patch face within `faces`.
+    pub(super) face_in_span: usize,
+    /// Is the span bounded by singular edges (as opposed to periodic)?
+    pub(super) boundary: bool,
+}
+
+impl CornerSpan {
+    pub(super) fn num_faces(&self) -> usize {
+        self.faces.len()
+    }
+
     fn valence(&self) -> usize {
         self.edges.len()
     }
 
-    /// The same ring traversed clockwise, re-aligned to start at the edge
-    /// toward the face's *previous* corner — used to build the "minus" side
-    /// tangents and r-vectors by mirror symmetry.
-    fn reversed(&self) -> CornerRing {
-        let n = self.edges.len();
-        let mut edges = Vec::with_capacity(n);
-        let mut faces = Vec::with_capacity(n);
-        edges.push(self.edges[1]);
-        faces.push(self.faces[0]);
-        for j in 0..n - 1 {
-            edges.push(self.edges[(n - j) % n]);
-        }
-        for j in 1..n {
-            faces.push(self.faces[n - j]);
-        }
-        CornerRing {
-            vertex: self.vertex,
-            edges,
-            faces,
-        }
+    /// The far end of `edges[i]`.
+    fn edge_end(&self, level: &Level, i: usize) -> Index {
+        level.edge_opposite_vertex(self.edges[i] as usize, self.vertex)
+    }
+
+    /// The vertex of `faces[i]` diagonally opposite the corner vertex.
+    fn diagonal(&self, level: &Level, i: usize) -> Index {
+        let fv = level.face_vertices(self.faces[i] as usize);
+        let k = fv
+            .iter()
+            .position(|&v| v == self.vertex)
+            .expect("span faces are incident the corner vertex");
+        fv[(k + 2) % 4]
     }
 }
 
@@ -113,191 +168,436 @@ fn other_edge_at_vertex(level: &Level, face: Index, vertex: Index, edge: Index) 
     }
 }
 
-/// Walk the ordered one-ring around corner `corner` of `face`, requiring a
-/// smooth interior manifold neighborhood of quads.
-fn corner_ring(level: &Level, face: usize, corner: usize) -> Option<CornerRing> {
+/// Identify the span of quads around corner `corner` of `face`
+/// (`identifyManifoldCornerSpan`), treating infinitely sharp edges as
+/// singular when `inf_sharp_singular` is set. `None` for non-manifold
+/// neighborhoods and rings containing non-quad faces.
+pub(super) fn corner_span(
+    level: &Level,
+    face: usize,
+    corner: usize,
+    inf_sharp_singular: bool,
+) -> Option<CornerSpan> {
     let fv = level.face_vertices(face);
     let fe = level.face_edges(face);
-    let n = fv.len();
     let vertex = fv[corner];
+    let v = vertex as usize;
 
-    if level.is_vertex_boundary(vertex as usize) || level.vertex_sharpness(vertex as usize) > 0.0 {
+    // Manifold check: every incident edge has at most two faces, and the
+    // vertex is either interior (as many edges as faces) or a single
+    // boundary fan (one more edge than faces, two of them boundary edges).
+    let vertex_edges = level.vertex_edges(v);
+    let num_faces = level.vertex_faces(v).len();
+    if vertex_edges
+        .iter()
+        .any(|&e| level.is_edge_non_manifold(e as usize))
+    {
         return None;
     }
-    let valence = level.vertex_edges(vertex as usize).len();
-    if level.vertex_faces(vertex as usize).len() != valence {
-        return None; // non-manifold
+    let boundary_edges = vertex_edges
+        .iter()
+        .filter(|&&e| level.is_edge_boundary(e as usize))
+        .count();
+    let manifold = (vertex_edges.len() == num_faces && boundary_edges == 0)
+        || (vertex_edges.len() == num_faces + 1 && boundary_edges == 2);
+    if !manifold {
+        return None;
     }
 
-    let e0 = fe[corner]; // edge toward the next corner
-    let e1 = fe[(corner + n - 1) % n]; // edge toward the previous corner
+    let singular = |e: Index| is_edge_singular(level, e, inf_sharp_singular);
+    let face = face as Index;
+    let e_lead = fe[corner]; // toward the face's next corner
 
-    let mut edges = vec![e0];
-    let mut faces = vec![face as Index];
-    let mut current_face = face as Index;
-    let mut current_edge = e1;
-    while edges.len() < valence {
+    // Walk clockwise (across the leading edge, away from the face) until a
+    // singular edge is met or the ring closes.
+    let mut start_face = face;
+    let mut start_edge = e_lead;
+    let mut periodic = false;
+    let mut steps = 0;
+    loop {
+        if singular(start_edge) {
+            break;
+        }
+        let next = other_face_of_edge(level, start_edge, start_face)?;
+        if next == face {
+            periodic = true;
+            break;
+        }
+        if level.face_vertices(next as usize).len() != 4 {
+            return None;
+        }
+        start_edge = other_edge_at_vertex(level, next, vertex, start_edge)?;
+        start_face = next;
+        steps += 1;
+        if steps > num_faces {
+            return None;
+        }
+    }
+    if periodic {
+        start_face = face;
+        start_edge = e_lead;
+    }
+
+    // Gather the span counter-clockwise from its leading edge.
+    let mut edges = vec![start_edge];
+    let mut faces = vec![start_face];
+    let mut current_face = start_face;
+    let mut current_edge = other_edge_at_vertex(level, start_face, vertex, start_edge)?;
+    loop {
+        if periodic && current_edge == e_lead {
+            break;
+        }
+        if !periodic && singular(current_edge) {
+            edges.push(current_edge);
+            break;
+        }
         edges.push(current_edge);
-        let next_face = other_face_of_edge(level, current_edge, current_face)?;
-        if level.face_vertices(next_face as usize).len() != 4 {
+        let next = other_face_of_edge(level, current_edge, current_face)?;
+        if level.face_vertices(next as usize).len() != 4 {
             return None;
         }
-        faces.push(next_face);
-        current_edge = other_edge_at_vertex(level, next_face, vertex, current_edge)?;
-        current_face = next_face;
-    }
-    if current_edge != e0 {
-        return None; // failed to close the ring
-    }
-    for &e in &edges {
-        if level.edge_sharpness(e as usize) > 0.0 || level.edge_faces(e as usize).len() != 2 {
+        faces.push(next);
+        current_edge = other_edge_at_vertex(level, next, vertex, current_edge)?;
+        current_face = next;
+        if faces.len() > num_faces {
             return None;
         }
     }
-    Some(CornerRing {
+    if periodic && faces.len() != num_faces {
+        return None; // disconnected fans around a non-manifold vertex
+    }
+    let face_in_span = faces.iter().position(|&f| f == face)?;
+    Some(CornerSpan {
         vertex,
         edges,
         faces,
+        face_in_span,
+        boundary: !periodic,
     })
 }
 
-/// Stencil of the midpoint of `edge`.
-fn edge_midpoint(level: &Level, edge: Index) -> SparsePoint {
-    let [a, b] = level.edge_vertices(edge as usize);
-    SparsePoint(vec![(a, 0.5), (b, 0.5)])
+/// The `Sdc::Crease::Rule` at a vertex with the given sharpness and number
+/// of sharp incident edges (the rule does not depend on the options).
+pub(super) fn vertex_rule(vertex_sharpness: f32, sharp_edges: usize) -> Rule {
+    Crease::new(sdc::Options::default()).determine_vertex_vertex_rule(vertex_sharpness, sharp_edges)
 }
 
-/// Stencil of the centroid of (quad) `face`.
-fn face_centroid(level: &Level, face: Index) -> SparsePoint {
-    let fv = level.face_vertices(face as usize);
-    SparsePoint(fv.iter().map(|&v| (v, 1.0 / fv.len() as f32)).collect())
+// ----------------------------------------------------------------------
+//  Corner, edge and face points (CatmarkLimits / GregoryConverter)
+// ----------------------------------------------------------------------
+
+/// The scale factor applied to limit tangents at an interior vertex of the
+/// given valence, arising from the eigenvalues of the subdivision matrix
+/// (`CatmarkLimits::computeCoefficient`); `1/2` at valence 4.
+fn edge_factor(valence: usize) -> f32 {
+    let inv = 1.0 / valence as f64;
+    let cos_t = (2.0 * std::f64::consts::PI * inv).cos();
+    let divisor = (cos_t + 5.0) + ((cos_t + 9.0) * (cos_t + 1.0)).sqrt();
+    (16.0 * inv / divisor) as f32
 }
 
-/// The Catmull-Clark limit point of the ring's vertex:
-/// `p = (n-3)/(n+5) v + 4/(n(n+5)) Σ (m_j + c_j)`.
-fn limit_point(level: &Level, ring: &CornerRing) -> SparsePoint {
-    let n = ring.valence() as f32;
-    let mut p = SparsePoint::default();
-    p.add(ring.vertex, (n - 3.0) / (n + 5.0));
-    let w = 4.0 / (n * (n + 5.0));
-    for j in 0..ring.valence() {
-        p.add_scaled(&edge_midpoint(level, ring.edges[j]), w);
-        p.add_scaled(&face_centroid(level, ring.faces[j]), w);
+/// Corner point and edge points of a smooth interior corner
+/// (`CatmarkLimits::ComputeInteriorPointWeights`): the Catmull-Clark limit
+/// point of the vertex, offset along its scaled limit tangents in the
+/// directions of the face's two edges.
+fn interior_points(level: &Level, span: &CornerSpan) -> (SparsePoint, SparsePoint, SparsePoint) {
+    let n = span.valence();
+    let nf = n as f32;
+    let p_coeff = 1.0 / (nf * (nf + 5.0));
+
+    let mut p = SparsePoint::of(&[(span.vertex, nf / (nf + 5.0))]);
+    for i in 0..n {
+        p.add(span.edge_end(level, i), 4.0 * p_coeff);
+        p.add(span.diagonal(level, i), p_coeff);
     }
-    p
+
+    // The limit tangent along edge `j`: each edge point contributes three
+    // cosine terms (its own angle and its two neighbors'), each face point
+    // two.
+    let tan_coeff = edge_factor(n) * 0.5 / (nf + 5.0);
+    let theta = std::f32::consts::TAU / nf;
+    let tangent = |j: usize| -> SparsePoint {
+        let mut t = SparsePoint::default();
+        for i in 0..n {
+            let a = (i as f32 - j as f32) * theta;
+            t.add(
+                span.edge_end(level, i),
+                tan_coeff * (2.0 * (a + theta).cos() + 4.0 * a.cos() + 2.0 * (a - theta).cos()),
+            );
+            t.add(
+                span.diagonal(level, i),
+                tan_coeff * (a.cos() + (a + theta).cos()),
+            );
+        }
+        t
+    };
+
+    let mut ep = p.clone();
+    ep.add_scaled(&tangent(0), 1.0);
+    let mut em = p.clone();
+    em.add_scaled(&tangent(1), 1.0);
+    (p, ep, em)
 }
 
-/// The scaled limit tangent along the ring's first edge:
-/// `t = (2/n) Σ_j [ (1 - σ cos(π/n)) cos(2πj/n) m_j + 2σ cos((2πj+π)/n) c_j ]`
-/// with `σ = 1/√(4 + cos²(π/n))`.
-fn limit_tangent(level: &Level, ring: &CornerRing) -> SparsePoint {
-    let n = ring.valence() as f32;
-    let theta = std::f32::consts::TAU / n;
-    let cos_half = (std::f32::consts::PI / n).cos();
-    let sigma = 1.0 / (4.0 + cos_half * cos_half).sqrt();
-    let m_scale = (2.0 / n) * (1.0 - sigma * cos_half);
-    let c_scale = (2.0 / n) * 2.0 * sigma;
+/// Corner point and edge points of a smooth corner on a boundary or
+/// infinitely sharp crease with two or more faces in its span
+/// (`CatmarkLimits::ComputeBoundaryPointWeights`). The limit point and the
+/// tangent along the boundary come from the cubic B-spline boundary curve;
+/// the tangent across it from the crease limit-tangent rule; an edge point
+/// on an interior edge at angle `a` from the leading boundary edge is
+/// offset along `cos(a)·t_boundary + sin(a)·t_interior`.
+fn boundary_points(level: &Level, span: &CornerSpan) -> (SparsePoint, SparsePoint, SparsePoint) {
+    let k = span.num_faces();
+    debug_assert!(span.boundary && k > 1);
+    let v = span.vertex;
+    let e0 = span.edge_end(level, 0);
+    let ek = span.edge_end(level, k);
 
-    let mut t = SparsePoint::default();
-    for j in 0..ring.valence() {
-        let jf = j as f32;
-        t.add_scaled(
-            &edge_midpoint(level, ring.edges[j]),
-            m_scale * (jf * theta).cos(),
-        );
-        t.add_scaled(
-            &face_centroid(level, ring.faces[j]),
-            c_scale * (jf * theta + 0.5 * theta).cos(),
-        );
+    let p = SparsePoint::of(&[(v, 4.0 / 6.0), (e0, 1.0 / 6.0), (ek, 1.0 / 6.0)]);
+    let t_boundary = SparsePoint::of(&[(e0, 1.0 / 6.0), (ek, -1.0 / 6.0)]);
+
+    let kf = k as f32;
+    let theta = std::f32::consts::PI / kf;
+    let c = theta.cos();
+    let s = theta.sin();
+    let div3 = 1.0 / 3.0;
+    let div3kc = 1.0 / (3.0 * kf + c);
+    let gamma = -4.0 * s * div3kc;
+    let alpha_0k = -((1.0 + 2.0 * c) * (1.0 + c).sqrt()) * div3kc / (1.0 - c).sqrt();
+    let beta_0 = s * div3kc;
+
+    let mut t_interior = SparsePoint::of(&[
+        (v, gamma * div3),
+        (e0, alpha_0k * div3),
+        (ek, alpha_0k * div3),
+        (span.diagonal(level, 0), beta_0 * div3),
+    ]);
+    for i in 1..k {
+        let sin_i = (theta * i as f32).sin();
+        let sin_i1 = (theta * (i + 1) as f32).sin();
+        t_interior.add(span.edge_end(level, i), 4.0 * sin_i * div3kc * div3);
+        t_interior.add(span.diagonal(level, i), (sin_i + sin_i1) * div3kc * div3);
     }
-    t
+
+    let along = |angle: f32| -> SparsePoint {
+        let mut e = p.clone();
+        e.add_scaled(&t_boundary, angle.cos());
+        e.add_scaled(&t_interior, angle.sin());
+        e
+    };
+    let f = span.face_in_span;
+    let ep = if f == 0 {
+        SparsePoint::of(&[(v, 2.0 / 3.0), (e0, 1.0 / 3.0)])
+    } else {
+        along(theta * f as f32)
+    };
+    let em = if f + 1 == k {
+        SparsePoint::of(&[(v, 2.0 / 3.0), (ek, 1.0 / 3.0)])
+    } else {
+        along(theta * (f + 1) as f32)
+    };
+    (p, ep, em)
 }
 
-/// The subdominant eigenvalue of Catmull-Clark subdivision at valence `n`
-/// (`λ = 1/2` for the regular case `n = 4`).
-fn subdominant_eigenvalue(n: usize) -> f32 {
-    let theta = std::f32::consts::TAU / n as f32;
-    let cos_half = (std::f32::consts::PI / n as f32).cos();
-    (5.0 + theta.cos() + cos_half * (18.0 + 2.0 * theta.cos()).sqrt()) / 16.0
+/// Everything known about one corner of the patch face.
+struct Corner {
+    span: CornerSpan,
+    /// A regular corner: two faces on a boundary/crease or four interior.
+    regular: bool,
+    /// `cos` of the angle between consecutive edges of the span, as used by
+    /// the face-point blend (zero for regular corners).
+    cos_angle: f32,
+    /// Does the edge point `E+` (`E-`) lie on the span's leading (trailing)
+    /// singular edge?
+    ep_on_boundary: bool,
+    em_on_boundary: bool,
+    p: SparsePoint,
+    ep: SparsePoint,
+    em: SparsePoint,
 }
 
-/// The `r` vector of the ring's first edge:
-/// `r = (m_1 - m_{n-1})/3 + 2(c_0 - c_{n-1})/3` — in the regular case this
-/// equals `P_t + P_st/3`, the transversal component of the Bézier interior
-/// point.
-fn r_vector(level: &Level, ring: &CornerRing) -> SparsePoint {
-    let n = ring.valence();
-    let mut r = SparsePoint::default();
-    r.add_scaled(&edge_midpoint(level, ring.edges[1 % n]), 1.0 / 3.0);
-    r.add_scaled(&edge_midpoint(level, ring.edges[n - 1]), -1.0 / 3.0);
-    r.add_scaled(&face_centroid(level, ring.faces[0]), 2.0 / 3.0);
-    r.add_scaled(&face_centroid(level, ring.faces[n - 1]), -2.0 / 3.0);
-    r
+/// The face point `F+` (`plus`) or `F-` of corner `near`, blending toward
+/// the adjacent corner `far` across the face's edge between them
+/// (`computeIrregularFacePoint`):
+/// `f = [c_far P + (3 - 2 c_near - c_far) E_near + 2 c_near E_far] / 3 + R`,
+/// where `R` is the transversal component taken from the two pairs of
+/// ring points on either side of that edge in the near corner's span.
+fn irregular_face_point(level: &Level, near: &Corner, far: &Corner, plus: bool) -> SparsePoint {
+    let (e_near, e_far, edge, sign) = if plus {
+        (&near.ep, &far.em, near.span.face_in_span, 1.0)
+    } else {
+        (&near.em, &far.ep, near.span.face_in_span + 1, -1.0)
+    };
+    let cos_near = near.cos_angle;
+    let cos_far = far.cos_angle;
+    let mut f = near.p.scaled(cos_far / 3.0);
+    f.add_scaled(e_near, (3.0 - 2.0 * cos_near - cos_far) / 3.0);
+    f.add_scaled(e_far, 2.0 * cos_near / 3.0);
+
+    let span = &near.span;
+    let valence = span.valence();
+    let prev = (edge + valence - 1) % valence;
+    let next = (edge + 1) % valence;
+    debug_assert!(prev < span.num_faces() && edge < span.num_faces());
+    f.add(span.edge_end(level, prev), -sign / 9.0);
+    f.add(span.diagonal(level, prev), -sign / 18.0);
+    f.add(span.diagonal(level, edge), sign / 18.0);
+    f.add(span.edge_end(level, next), sign / 9.0);
+    f
 }
 
-/// Build the 20 Gregory control-point stencils for `face`, or `None` when
-/// any corner neighborhood is not smooth-interior-manifold.
+/// Build the 20 Gregory control-point stencils for `face`
+/// (`GregoryConverter::Convert`), or `None` when a corner neighborhood is
+/// non-manifold or contains non-quad faces.
 pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryPoints>> {
-    if level.face_vertices(face).len() != 4 {
+    let fv = level.face_vertices(face);
+    if fv.len() != 4 {
         return None;
     }
 
-    struct Corner {
-        p: SparsePoint,
-        ep: SparsePoint,
-        em: SparsePoint,
-        rp: SparsePoint,
-        rm: SparsePoint,
-        cos_theta: f32,
-    }
-
+    // Corner points P and edge points E+/E- first: the face points depend
+    // on the edge points of adjacent corners.
     let mut corners = Vec::with_capacity(4);
     for k in 0..4 {
-        let ring = corner_ring(level, face, k)?;
-        let reversed = ring.reversed();
-        let n = ring.valence();
-        let lambda = subdominant_eigenvalue(n);
+        let v = fv[k];
+        let next = fv[(k + 1) % 4];
+        let prev = fv[(k + 3) % 4];
 
-        let p = limit_point(level, &ring);
-        let mut ep = p.clone();
-        ep.add_scaled(&limit_tangent(level, &ring), 2.0 * lambda / 3.0);
-        let mut em = p.clone();
-        em.add_scaled(&limit_tangent(level, &reversed), 2.0 * lambda / 3.0);
+        let vertex_sharpness = level.vertex_sharpness(v as usize);
+        let inf_vertex = Crease::is_infinite(vertex_sharpness);
+        let (mut sharp_edges, mut inf_edges) = (0usize, 0usize);
+        for &e in level.vertex_edges(v as usize) {
+            let s = level.edge_sharpness(e as usize);
+            sharp_edges += Crease::is_sharp(s) as usize;
+            inf_edges += Crease::is_infinite(s) as usize;
+        }
+        // Infinitely sharp edges partition the ring — except at a dart,
+        // whose single crease leaves the (smooth) limit neighborhood whole.
+        let split_at_inf_sharp =
+            inf_edges > 0 && vertex_rule(vertex_sharpness, sharp_edges) != Rule::Dart;
+        let span = corner_span(level, face, k, split_at_inf_sharp)?;
+
+        // A sharp corner interpolates its vertex: an infinitely sharp vertex,
+        // or a vertex whose infinitely sharp edges do not form a crease.
+        let sharp = if split_at_inf_sharp {
+            inf_vertex || inf_edges != 2
+        } else {
+            inf_vertex
+        };
+
+        let num_faces = span.num_faces();
+        let boundary = span.boundary;
+        let regular = !sharp && (num_faces << (boundary as usize)) == 4;
+        let cos_angle = if regular {
+            0.0
+        } else {
+            let full = if boundary {
+                std::f32::consts::PI
+            } else {
+                std::f32::consts::TAU
+            };
+            (full / num_faces as f32).cos()
+        };
+        let f = span.face_in_span;
+        let ep_on_boundary = boundary && f == 0;
+        let em_on_boundary = boundary && f + 1 == num_faces;
+
+        let (p, ep, em) = if sharp {
+            (
+                SparsePoint::of(&[(v, 1.0)]),
+                SparsePoint::of(&[(v, 2.0 / 3.0), (next, 1.0 / 3.0)]),
+                SparsePoint::of(&[(v, 2.0 / 3.0), (prev, 1.0 / 3.0)]),
+            )
+        } else if !boundary {
+            interior_points(level, &span)
+        } else if num_faces > 1 {
+            boundary_points(level, &span)
+        } else {
+            // A smooth corner of a single face: the crease rules of its two
+            // boundary edges.
+            (
+                SparsePoint::of(&[(v, 4.0 / 6.0), (next, 1.0 / 6.0), (prev, 1.0 / 6.0)]),
+                SparsePoint::of(&[(v, 2.0 / 3.0), (next, 1.0 / 3.0)]),
+                SparsePoint::of(&[(v, 2.0 / 3.0), (prev, 1.0 / 3.0)]),
+            )
+        };
 
         corners.push(Corner {
+            span,
+            regular,
+            cos_angle,
+            ep_on_boundary,
+            em_on_boundary,
             p,
             ep,
             em,
-            rp: r_vector(level, &ring),
-            rm: r_vector(level, &reversed),
-            cos_theta: (std::f32::consts::TAU / n as f32).cos(),
         });
     }
 
-    // Interior (face) points, blending across each edge of the patch:
-    // f_k^+ = [ c_{k+1} p_k + (3 - 2c_k - c_{k+1}) e_k^+ + 2c_k e_{k+1}^- + r_k^+ ] / 3
-    // f_k^- = [ c_{k-1} p_k + (3 - 2c_k - c_{k-1}) e_k^- + 2c_k e_{k-1}^+ + r_k^- ] / 3
+    // Face points F+/F-. Between two regular corners they are the interior
+    // Bézier points of the B-spline patch (a fixed blend of the face's
+    // corners); a face point next to a boundary edge is shared with its
+    // partner across the corner, as the surface is only one-sided there.
+    let regular_face_point = |k: usize| -> SparsePoint {
+        SparsePoint::of(&[
+            (fv[k], 4.0 / 9.0),
+            (fv[(k + 3) % 4], 2.0 / 9.0),
+            (fv[(k + 1) % 4], 2.0 / 9.0),
+            (fv[(k + 2) % 4], 1.0 / 9.0),
+        ])
+    };
+
     let mut points: GregoryPoints = Default::default();
     for k in 0..4 {
         let next = (k + 1) % 4;
         let prev = (k + 3) % 4;
-        let c0 = corners[k].cos_theta;
-        let c1 = corners[next].cos_theta;
-        let cm = corners[prev].cos_theta;
+        let c = &corners[k];
 
-        let mut fp = corners[k].p.scaled(c1 / 3.0);
-        fp.add_scaled(&corners[k].ep, (3.0 - 2.0 * c0 - c1) / 3.0);
-        fp.add_scaled(&corners[next].em, 2.0 * c0 / 3.0);
-        fp.add_scaled(&corners[k].rp, 1.0 / 3.0);
+        let mut fp_regular = c.regular && corners[next].regular;
+        let mut fm_regular = c.regular && corners[prev].regular;
+        let mut fp_copied = false;
+        let mut fm_copied = false;
+        if c.span.boundary {
+            if c.span.num_faces() > 1 {
+                if c.ep_on_boundary {
+                    fp_regular = fm_regular;
+                    fp_copied = !fp_regular;
+                }
+                if c.em_on_boundary {
+                    fm_regular = fp_regular;
+                    fm_copied = !fm_regular;
+                }
+            } else {
+                fp_regular = true;
+                fm_regular = true;
+            }
+        }
 
-        let mut fm = corners[k].p.scaled(cm / 3.0);
-        fm.add_scaled(&corners[k].em, (3.0 - 2.0 * c0 - cm) / 3.0);
-        fm.add_scaled(&corners[prev].ep, 2.0 * c0 / 3.0);
-        fm.add_scaled(&corners[k].rm, 1.0 / 3.0);
+        let fp = if fp_regular {
+            regular_face_point(k)
+        } else if fp_copied {
+            SparsePoint::default()
+        } else {
+            irregular_face_point(level, c, &corners[next], true)
+        };
+        let fm = if fm_regular {
+            regular_face_point(k)
+        } else if fm_copied {
+            SparsePoint::default()
+        } else {
+            irregular_face_point(level, c, &corners[prev], false)
+        };
+        let (fp, fm) = if fp_copied {
+            (fm.clone(), fm)
+        } else if fm_copied {
+            (fp.clone(), fp)
+        } else {
+            (fp, fm)
+        };
 
-        points[5 * k] = corners[k].p.clone();
-        points[5 * k + 1] = corners[k].ep.clone();
-        points[5 * k + 2] = corners[k].em.clone();
+        points[5 * k] = c.p.clone();
+        points[5 * k + 1] = c.ep.clone();
+        points[5 * k + 2] = c.em.clone();
         points[5 * k + 3] = fp;
         points[5 * k + 4] = fm;
     }
@@ -458,83 +758,60 @@ pub(crate) fn evaluate_basis(s: f32, t: f32) -> ([f32; 20], [f32; 20], [f32; 20]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::far::{PatchTableFactory, PatchType, TopologyDescriptor, TopologyRefinerFactory};
+    use crate::far::{
+        PatchTable, PatchTableFactory, PatchType, TopologyDescriptor, TopologyRefiner,
+        TopologyRefinerFactory,
+    };
     use crate::sdc;
 
-    /// THE oracle for the whole Gregory construction: on a fully regular
-    /// neighborhood the Gregory patch must degenerate to the exact bicubic
-    /// B-spline patch — for *arbitrary* control data. This pins down the
-    /// limit-point weights, the subdominant eigenvalue, the tangent
-    /// stencils, the r-vectors and the face-point formulas all at once
-    /// (positions *and* derivatives are compared).
-    #[test]
-    fn gregory_reproduces_bspline_on_regular_face() {
-        // A 6x6-vertex grid; the central face has a fully interior
-        // neighborhood.
-        let mut verts_per_face = Vec::new();
-        let mut face_verts: Vec<u32> = Vec::new();
-        for j in 0..5u32 {
-            for i in 0..5u32 {
-                verts_per_face.push(4usize);
-                let v = j * 6 + i;
-                face_verts.extend_from_slice(&[v, v + 1, v + 7, v + 6]);
-            }
-        }
-        // Pseudo-random control positions (simple LCG): the equivalence
-        // must hold for any data, not just smooth samples.
+    /// Pseudo-random control positions (simple LCG) for a `w x h` vertex
+    /// grid: the equivalences below must hold for any data, not just
+    /// smooth samples.
+    fn jittered_grid(w: usize, h: usize) -> Vec<[f32; 3]> {
         let mut seed = 0x12345678u32;
         let mut rand = move || {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             (seed >> 8) as f32 / (1u32 << 24) as f32
         };
-        let positions: Vec<[f32; 3]> = (0..36)
+        (0..w * h)
             .map(|k| {
                 [
-                    (k % 6) as f32 + rand() * 0.4,
-                    (k / 6) as f32 + rand() * 0.4,
+                    (k % w) as f32 + rand() * 0.4,
+                    (k / w) as f32 + rand() * 0.4,
                     rand(),
                 ]
             })
-            .collect();
+            .collect()
+    }
 
-        let descriptor = TopologyDescriptor::new(36, &verts_per_face, &face_verts);
-        let refiner = TopologyRefinerFactory::create(
-            descriptor,
-            sdc::SchemeType::Catmark,
-            sdc::Options::default(),
-        )
-        .unwrap();
-
-        // The central face (grid coordinates 2,2) is face 12.
-        let face = 12usize;
-        let table = PatchTableFactory::create(&refiner).unwrap();
-        let patch = (0..table.num_patches())
-            .find(|&p| table.patch_face(p) as usize == face)
-            .unwrap();
-        assert_eq!(table.patch_type(patch), PatchType::Regular);
-        // Base level, no refinement: patch-local (s,t) == ptex (u,v).
-        let param = table.patch_param(patch);
-        assert_eq!(param.depth, 0);
-        assert_eq!(param.rotation, 0);
-
-        let level = refiner.level(0).inner();
-        let points = build(level, face).expect("interior regular face qualifies");
-
-        let eval_gregory = |s: f32, t: f32| -> [[f32; 3]; 3] {
-            let (w, ws, wt) = evaluate_basis(s, t);
-            let mut out = [[0.0f32; 3]; 3];
-            for (pt, stencil) in points.iter().enumerate() {
-                for &(cv, sw) in &stencil.0 {
-                    for c in 0..3 {
-                        out[0][c] += w[pt] * sw * positions[cv as usize][c];
-                        out[1][c] += ws[pt] * sw * positions[cv as usize][c];
-                        out[2][c] += wt[pt] * sw * positions[cv as usize][c];
-                    }
-                }
+    /// Face-vertex lists of a quad grid with `w x h` vertices.
+    fn grid_faces(w: u32, h: u32) -> (Vec<usize>, Vec<u32>) {
+        let mut verts_per_face = Vec::new();
+        let mut face_verts = Vec::new();
+        for j in 0..h - 1 {
+            for i in 0..w - 1 {
+                verts_per_face.push(4usize);
+                let v = j * w + i;
+                face_verts.extend_from_slice(&[v, v + 1, v + w + 1, v + w]);
             }
-            out
-        };
+        }
+        (verts_per_face, face_verts)
+    }
 
+    /// THE oracle for the whole Gregory construction: wherever the patch
+    /// table extracts a regular B-spline patch (interior, boundary, pinned
+    /// corner or infinitely sharp crease), the Gregory patch built on the
+    /// same face must reproduce it — positions *and* derivatives — for
+    /// arbitrary control data. This pins down the limit-point weights, the
+    /// edge factor, the tangent stencils and the face-point formulas at
+    /// once. Returns the number of faces compared.
+    fn assert_gregory_matches_regular_patches(
+        refiner: &TopologyRefiner,
+        table: &PatchTable,
+        positions: &[[f32; 3]],
+    ) -> usize {
+        assert_eq!(refiner.max_level(), 0, "oracle expects base-level patches");
+        let level = refiner.level(0).inner();
         let samples = [
             (0.0f32, 0.0f32),
             (1.0, 1.0),
@@ -544,29 +821,193 @@ mod tests {
             (0.35, 0.05),
             (0.65, 0.45),
         ];
-        for &(s, t) in &samples {
-            let (bp, bdu, bdv) = table.evaluate(patch, s, t, &positions);
-            let g = eval_gregory(s, t);
-            for c in 0..3 {
-                assert!(
-                    (g[0][c] - bp[c]).abs() < 2e-4,
-                    "position mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
-                    g[0],
-                    bp
-                );
-                assert!(
-                    (g[1][c] - bdu[c]).abs() < 2e-3,
-                    "du mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
-                    g[1],
-                    bdu
-                );
-                assert!(
-                    (g[2][c] - bdv[c]).abs() < 2e-3,
-                    "dv mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
-                    g[2],
-                    bdv
-                );
+        let mut compared = 0;
+        for patch in 0..table.num_patches() {
+            if table.patch_type(patch) != PatchType::Regular {
+                continue;
             }
+            let face = table.patch_face(patch) as usize;
+            let param = table.patch_param(patch);
+            assert_eq!(param.depth, 0);
+            assert_eq!(param.rotation, 0);
+            let points = build(level, face).expect("every manifold quad face builds");
+
+            for &(s, t) in &samples {
+                let (w, ws, wt) = evaluate_basis(s, t);
+                let mut g = [[0.0f32; 3]; 3];
+                for (pt, stencil) in points.iter().enumerate() {
+                    for &(cv, sw) in &stencil.0 {
+                        for c in 0..3 {
+                            g[0][c] += w[pt] * sw * positions[cv as usize][c];
+                            g[1][c] += ws[pt] * sw * positions[cv as usize][c];
+                            g[2][c] += wt[pt] * sw * positions[cv as usize][c];
+                        }
+                    }
+                }
+                let (bp, bdu, bdv) = table.evaluate(patch, s, t, positions);
+                for c in 0..3 {
+                    assert!(
+                        (g[0][c] - bp[c]).abs() < 2e-4,
+                        "face {face}: position mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
+                        g[0],
+                        bp
+                    );
+                    assert!(
+                        (g[1][c] - bdu[c]).abs() < 2e-3,
+                        "face {face}: du mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
+                        g[1],
+                        bdu
+                    );
+                    assert!(
+                        (g[2][c] - bdv[c]).abs() < 2e-3,
+                        "face {face}: dv mismatch at ({s},{t}): gregory {:?} vs bspline {:?}",
+                        g[2],
+                        bdv
+                    );
+                }
+            }
+            compared += 1;
         }
+        compared
+    }
+
+    #[test]
+    fn gregory_reproduces_bspline_on_interior_and_boundary_faces() {
+        // A 6x6-vertex grid with unpinned corners: the 3x3 central faces
+        // have fully interior neighborhoods and the border faces regular
+        // boundary corners; only the four faces at the grid's smooth
+        // (unpinned) corners are irregular and skipped by the oracle.
+        let (verts_per_face, face_verts) = grid_faces(6, 6);
+        let positions = jittered_grid(6, 6);
+        let descriptor = TopologyDescriptor::new(36, &verts_per_face, &face_verts);
+        let refiner = TopologyRefinerFactory::create(
+            descriptor,
+            sdc::SchemeType::Catmark,
+            sdc::Options::default(),
+        )
+        .unwrap();
+        let table = PatchTableFactory::create(&refiner).unwrap();
+        assert_eq!(
+            assert_gregory_matches_regular_patches(&refiner, &table, &positions),
+            21
+        );
+    }
+
+    #[test]
+    fn gregory_reproduces_bspline_on_boundary_and_corner_faces() {
+        // A 5x5-vertex grid with pinned corners: all 16 faces are regular —
+        // interior, boundary (valence-3 corners, one edge point along the
+        // boundary curve) and pinned corners (sharp corner points).
+        let (verts_per_face, face_verts) = grid_faces(5, 5);
+        let positions = jittered_grid(5, 5);
+        let options = sdc::Options::default()
+            .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::EdgeAndCorner);
+        let descriptor = TopologyDescriptor::new(25, &verts_per_face, &face_verts);
+        let refiner =
+            TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
+        let table = PatchTableFactory::create(&refiner).unwrap();
+        assert_eq!(
+            assert_gregory_matches_regular_patches(&refiner, &table, &positions),
+            16
+        );
+    }
+
+    #[test]
+    fn gregory_reproduces_bspline_along_infinitely_sharp_creases() {
+        // A 6x6-vertex grid split by an infinitely sharp crease along its
+        // middle row of edges, plus a second crease along a column meeting
+        // it: every face is regular (crease vertices are regular crease
+        // corners, and the crossing is a regular set of inf-sharp corners),
+        // and the crease-adjacent faces are boundary-type B-spline patches.
+        let (verts_per_face, face_verts) = grid_faces(6, 6);
+        let positions = jittered_grid(6, 6);
+        let mut creases = Vec::new();
+        for i in 0..5u32 {
+            creases.push([18 + i, 19 + i]); // row 3
+        }
+        for j in 0..5u32 {
+            creases.push([2 + 6 * j, 8 + 6 * j]); // column 2
+        }
+        let weights = vec![sdc::SHARPNESS_INFINITE; creases.len()];
+        let options = sdc::Options::default()
+            .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::EdgeAndCorner);
+        let descriptor = TopologyDescriptor::new(36, &verts_per_face, &face_verts)
+            .with_creases(&creases, &weights);
+        let refiner =
+            TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
+        let table = PatchTableFactory::create(&refiner).unwrap();
+        assert_eq!(
+            assert_gregory_matches_regular_patches(&refiner, &table, &positions),
+            25
+        );
+    }
+
+    #[test]
+    fn edge_factor_matches_reference_table() {
+        // The first entries of OpenSubdiv's `efTable`.
+        let expected = [
+            (3, 8.128_157_290_637_231e-1),
+            (4, 0.5),
+            (5, 3.636_440_632_914_28e-1),
+            (6, 2.875_137_970_607_708_5e-1),
+            (7, 2.386_878_668_585_167_8e-1),
+            (12, 1.312_756_841_588_301_7e-1),
+            (29, 5.296_209_143_379_613_4e-2),
+        ];
+        for (valence, value) in expected {
+            assert!(
+                (edge_factor(valence) as f64 - value).abs() < 1e-7,
+                "valence {valence}"
+            );
+        }
+    }
+
+    #[test]
+    fn corner_spans_follow_boundaries_and_creases() {
+        // A 3x3-face grid with an infinitely sharp crease along the middle
+        // column: the central face's corners split the ring of their
+        // valence-4 vertices into two-face spans.
+        let (verts_per_face, face_verts) = grid_faces(4, 4);
+        let creases = [[1u32, 5], [5, 9], [9, 13]];
+        let weights = [sdc::SHARPNESS_INFINITE; 3];
+        let descriptor = TopologyDescriptor::new(16, &verts_per_face, &face_verts)
+            .with_creases(&creases, &weights);
+        let refiner = TopologyRefinerFactory::create(
+            descriptor,
+            sdc::SchemeType::Catmark,
+            sdc::Options::default(),
+        )
+        .unwrap();
+        let level = refiner.level(0).inner();
+
+        // Face 4 (vertices 5, 6, 10, 9): corner 0 is vertex 5, on the crease.
+        let span = corner_span(level, 4, 0, true).unwrap();
+        assert!(span.boundary);
+        assert_eq!(span.num_faces(), 2);
+        assert_eq!(span.edges.len(), 3);
+        // Both singular edges are crease edges incident vertex 5.
+        assert!(level.edge_vertices(span.edges[0] as usize).contains(&1));
+        assert!(level.edge_vertices(span.edges[2] as usize).contains(&9));
+        // The patch face is the trailing face of the span (its edge toward
+        // the previous corner, 5-9, is the trailing crease edge).
+        assert_eq!(span.face_in_span, 1);
+        assert_eq!(span.faces[1], 4);
+
+        // Ignoring sharpness, the same corner is a periodic valence-4 ring
+        // starting from the edge toward the next corner.
+        let ring = corner_span(level, 4, 0, false).unwrap();
+        assert!(!ring.boundary);
+        assert_eq!(ring.num_faces(), 4);
+        assert_eq!(ring.faces[0], 4);
+        assert_eq!(ring.face_in_span, 0);
+        assert!(level.edge_vertices(ring.edges[0] as usize).contains(&6));
+        assert!(level.edge_vertices(ring.edges[1] as usize).contains(&9));
+
+        // Corner 1 of face 0 is vertex 1, a boundary vertex on the crease's
+        // end: its span is bounded by a boundary edge and the crease.
+        let span = corner_span(level, 0, 1, true).unwrap();
+        assert!(span.boundary);
+        assert_eq!(span.num_faces(), 1);
+        assert_eq!(span.face_in_span, 0);
     }
 }

@@ -264,10 +264,14 @@ impl TopologyRefiner {
     /// Feature-adaptively refine the topology (`RefineAdaptive`): starting
     /// from the base level, only faces whose neighborhood prevents the
     /// limit surface from being a (boundary-aware) bicubic B-spline patch —
-    /// extraordinary vertices, non-quads, creases — are *selected* and
-    /// subdivided, together with their one-ring support, until they resolve
-    /// or `options.isolation_level` is reached. Levels above 0 are sparse:
-    /// memory grows with the mesh's irregular features, not with `4^level`.
+    /// extraordinary vertices, non-quads, semi-sharp creases, and irregular
+    /// infinitely sharp features — are *selected* and subdivided, together
+    /// with their one-ring support, until they resolve or
+    /// `options.isolation_level` is reached. Regular infinitely sharp
+    /// creases and corners are not isolated: like boundaries, they bound
+    /// exact B-spline patches (OpenSubdiv's `useInfSharpPatch`). Levels
+    /// above 0 are sparse: memory grows with the mesh's irregular features,
+    /// not with `4^level`.
     ///
     /// Patches for an adaptively refined mesh live at mixed depths — build
     /// a [`super::PatchTable`] to evaluate the limit surface.
