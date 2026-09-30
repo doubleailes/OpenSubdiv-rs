@@ -130,13 +130,14 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   regular. Regular neighborhoods (including sharpened boundaries, pinned
   corners and infinitely sharp creases, which are treated as boundaries as
   with OpenSubdiv's `useInfSharpPatch`) become exact bicubic B-spline
-  patches; every other manifold face at its isolation level — extraordinary
-  vertices, irregular boundary and crease corners, sharp corners, darts —
+  patches; every other face at its isolation level — extraordinary
+  vertices, irregular boundary and crease corners, sharp corners, darts,
+  and faces around non-manifold edges and vertices (infinitely sharp, as in
+  OpenSubdiv) —
   is capped with a **Gregory patch** (as OpenSubdiv's
   `ENDCAP_GREGORY_BASIS`), interpolating the corner limit points with C0
-  boundaries and approximate G1 smoothness; only non-manifold neighborhoods
-  and unsharpened (`VtxBoundaryInterpolation::None`) boundaries fall back to
-  bilinear quads
+  boundaries and approximate G1 smoothness; only unsharpened
+  (`VtxBoundaryInterpolation::None`) boundaries fall back to bilinear quads
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -164,17 +165,21 @@ Patch tables extract exact bicubic B-spline patches wherever the limit
 surface is polynomial; boundary, crease and corner patches are realized by
 folding the phantom-point reflection `2a − b` into the basis weights, which
 is mathematically equivalent to OpenSubdiv's boundary basis masks. Every
-other manifold face at its isolation level is capped with a Gregory patch
+other face at its isolation level is capped with a Gregory patch
 built as OpenSubdiv's `GregoryConverter` builds it
 (`far/catmarkPatchBuilder.cpp`): corners are classified by the *span* of
-faces around them bounded by boundaries and infinitely sharp creases, and
+faces around them bounded by boundaries, non-manifold edges and infinitely
+sharp creases, and
 the corner, edge and face points use OpenSubdiv's own coefficients for
 smooth interior, smooth boundary/crease, sharp and dart corners. The test
 suite verifies that the construction degenerates to the exact B-spline
 patch on regular interior, boundary, pinned-corner and crease neighborhoods
-(for arbitrary control data), pinning every coefficient. Only non-manifold
-neighborhoods and unsharpened (`VtxBoundaryInterpolation::None`) boundaries
-fall back to bilinear quads of the refined level; semi-sharp features that
+(for arbitrary control data), pinning every coefficient. As in OpenSubdiv,
+non-manifold edges are made infinitely sharp, and non-manifold vertices
+infinitely sharp unless they lie on a crease of exactly two non-manifold
+edges, so non-manifold neighborhoods refine and patch like sharp features.
+Only unsharpened (`VtxBoundaryInterpolation::None`) boundaries fall back to
+bilinear quads of the refined level; semi-sharp features that
 are still unresolved at the isolation cap are capped as if smooth, as
 OpenSubdiv does.
 
@@ -189,7 +194,6 @@ different depths evaluate the same limit surface.
 Not yet ported (roadmap):
 
 - Single-crease patches for semi-sharp creases (`useSingleCreasePatch`)
-  and non-manifold patches
 - Loop-scheme (box-spline) patches and adaptive refinement for Loop
 - Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
