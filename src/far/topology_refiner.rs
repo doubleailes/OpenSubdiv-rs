@@ -30,12 +30,33 @@ pub struct AdaptiveOptions {
     /// The maximum level of refinement applied to isolate irregular
     /// features (`isolationLevel`).
     pub isolation_level: usize,
+    /// Represent regular faces along a semi-sharp crease as single-crease
+    /// patches instead of isolating the crease (`useSingleCreasePatch`).
+    ///
+    /// A face whose corners are regular and which a single straight
+    /// semi-sharp crease of uniform sharpness bounds on one side is not
+    /// refined further: the [`super::PatchTable`] covers it with one exact
+    /// [`super::PatchType::Regular`] patch carrying the crease's sharpness
+    /// ([`super::PatchTable::single_crease_sharpness`]), rather than with
+    /// `4^level` patches down to where the crease decays (or to the
+    /// isolation cap). Off by default, as in OpenSubdiv.
+    pub use_single_crease_patch: bool,
 }
 
 impl AdaptiveOptions {
     /// Isolate irregular features up to `isolation_level` levels deep.
     pub fn new(isolation_level: usize) -> Self {
-        Self { isolation_level }
+        Self {
+            isolation_level,
+            use_single_crease_patch: false,
+        }
+    }
+
+    /// Enable or disable single-crease patches
+    /// ([`use_single_crease_patch`](Self::use_single_crease_patch)).
+    pub fn with_single_crease_patch(mut self, enabled: bool) -> Self {
+        self.use_single_crease_patch = enabled;
+        self
     }
 }
 
@@ -174,6 +195,9 @@ pub struct TopologyRefiner {
     /// For each refinement step, the faces of the parent level that were
     /// selected for refinement (all `true` for uniform steps).
     selections: Vec<Vec<bool>>,
+    /// Did adaptive refinement leave single-crease patches unrefined
+    /// ([`AdaptiveOptions::use_single_crease_patch`])?
+    single_crease_patch: bool,
 }
 
 impl TopologyRefiner {
@@ -269,7 +293,9 @@ impl TopologyRefiner {
     /// with their one-ring support, until they resolve or
     /// `options.isolation_level` is reached. Regular infinitely sharp
     /// creases and corners are not isolated: like boundaries, they bound
-    /// exact B-spline patches (OpenSubdiv's `useInfSharpPatch`). Levels
+    /// exact B-spline patches (OpenSubdiv's `useInfSharpPatch`); with
+    /// [`AdaptiveOptions::use_single_crease_patch`], neither are regular
+    /// faces bounded by a single semi-sharp crease. Levels
     /// above 0 are sparse: memory grows with the mesh's irregular features,
     /// not with `4^level`.
     ///
@@ -291,6 +317,7 @@ impl TopologyRefiner {
             return;
         }
         self.adaptive = true;
+        self.single_crease_patch = options.use_single_crease_patch;
 
         while self.max_level() < options.isolation_level {
             let level_index = self.max_level();
@@ -305,6 +332,8 @@ impl TopologyRefiner {
                 let needs_isolation = match self.scheme_type() {
                     SchemeType::Catmark => {
                         super::patch_table::gather_regular_patch(level, f).is_none()
+                            && !(options.use_single_crease_patch
+                                && super::patch_table::single_crease_patch(level, f).is_some())
                     }
                     SchemeType::Bilinear => level.face_vertices(f).len() != 4,
                     SchemeType::Loop => false,
@@ -347,6 +376,12 @@ impl TopologyRefiner {
         }
         let parent = self.refinements[level - 1].child_face_parent_face(face) as usize;
         self.selections[level - 1][parent]
+    }
+
+    /// Should the patch table cover single-crease faces with single-crease
+    /// patches ([`AdaptiveOptions::use_single_crease_patch`])?
+    pub(super) fn uses_single_crease_patch(&self) -> bool {
+        self.single_crease_patch
     }
 
     /// Was `face` of `level` selected for further refinement?
@@ -454,6 +489,7 @@ impl TopologyRefinerFactory {
             fvar_channels,
             adaptive: false,
             selections: Vec::new(),
+            single_crease_patch: false,
         })
     }
 }

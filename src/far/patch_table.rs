@@ -30,6 +30,14 @@
 //!   weights at evaluation time — mathematically equivalent to OpenSubdiv's
 //!   boundary/corner basis masks, with infinitely sharp creases treated as
 //!   boundaries (OpenSubdiv's `useInfSharpPatch`).
+//!
+//!   With [`AdaptiveOptions::use_single_crease_patch`](super::AdaptiveOptions::use_single_crease_patch)
+//!   (OpenSubdiv's `useSingleCreasePatch`), a regular face bounded on one
+//!   side by a semi-sharp crease is a *single-crease* regular patch: its
+//!   16 control vertices are weighted across the crease by the exact limit
+//!   profile of the crease's sharpness
+//!   ([`PatchTable::single_crease_sharpness`]), so the crease needs no
+//!   isolation.
 //! * [`PatchType::GregoryBasis`] — every other face at its isolation
 //!   level is capped with a Gregory patch (see [`super::gregory`]):
 //!   extraordinary vertices, irregular boundary and crease corners, sharp
@@ -140,6 +148,13 @@ enum PatchKind {
     /// A 4x4 control-vertex grid (row-major, rows along `t`), with
     /// `INDEX_INVALID` marking phantom boundary slots.
     Regular([Index; 16]),
+    /// A complete 4x4 control-vertex grid (as for `Regular`) with a
+    /// semi-sharp crease along face edge `edge`.
+    SingleCrease {
+        cvs: [Index; 16],
+        edge: u8,
+        sharpness: f32,
+    },
     /// The 20 Gregory control points as stencils on the last level's
     /// vertices.
     Gregory(Box<GregoryPoints>),
@@ -190,7 +205,7 @@ impl PatchTable {
     /// The basis type of patch `patch`.
     pub fn patch_type(&self, patch: usize) -> PatchType {
         match &self.patches[patch].kind {
-            PatchKind::Regular(_) => PatchType::Regular,
+            PatchKind::Regular(_) | PatchKind::SingleCrease { .. } => PatchType::Regular,
             PatchKind::Gregory(_) => PatchType::GregoryBasis,
             PatchKind::Quads(_) => PatchType::Quads,
         }
@@ -219,6 +234,7 @@ impl PatchTable {
                 .copied()
                 .filter(|&cv| cv != INDEX_INVALID)
                 .collect(),
+            PatchKind::SingleCrease { cvs, .. } => cvs.to_vec(),
             PatchKind::Quads(cvs) => cvs.to_vec(),
             PatchKind::Gregory(points) => {
                 let mut cvs: Vec<Index> = Vec::new();
@@ -231,6 +247,19 @@ impl PatchTable {
                 }
                 cvs
             }
+        }
+    }
+
+    /// The sharpness of the semi-sharp crease carried by patch `patch`
+    /// (`GetSingleCreasePatchSharpnessValue`): positive for single-crease
+    /// patches — [`PatchType::Regular`] patches bounded by a semi-sharp
+    /// crease, built when the refiner enabled
+    /// [`AdaptiveOptions::use_single_crease_patch`](super::AdaptiveOptions::use_single_crease_patch)
+    /// — and `0.0` for every other patch.
+    pub fn single_crease_sharpness(&self, patch: usize) -> f32 {
+        match self.patches[patch].kind {
+            PatchKind::SingleCrease { sharpness, .. } => sharpness,
+            _ => 0.0,
         }
     }
 
@@ -298,6 +327,34 @@ impl PatchTable {
                         continue;
                     }
                     push(cv, w[slot], ws[slot], wt[slot]);
+                }
+            }
+            PatchKind::SingleCrease {
+                cvs,
+                edge,
+                sharpness,
+            } => {
+                // Edges 3 and 1 are the columns at s = 0 and s = 1, edges 0
+                // and 2 the rows at t = 0 and t = 1.
+                let (bu, dbu) = match edge {
+                    3 => crease_basis_oriented(s, *sharpness, false),
+                    1 => crease_basis_oriented(s, *sharpness, true),
+                    _ => bspline_basis(s),
+                };
+                let (bv, dbv) = match edge {
+                    0 => crease_basis_oriented(t, *sharpness, false),
+                    2 => crease_basis_oriented(t, *sharpness, true),
+                    _ => bspline_basis(t),
+                };
+                for j in 0..4 {
+                    for i in 0..4 {
+                        push(
+                            cvs[4 * j + i],
+                            bu[i] * bv[j],
+                            dbu[i] * bv[j],
+                            bu[i] * dbv[j],
+                        );
+                    }
                 }
             }
             PatchKind::Quads(cvs) => {
@@ -453,6 +510,7 @@ impl PatchTableFactory {
 
         let ptex = PtexIndices::new(refiner);
         let smooth_scheme = refiner.scheme_type() == SchemeType::Catmark;
+        let single_crease = refiner.uses_single_crease_patch();
 
         let mut patches = Vec::new();
         let mut face_to_patch: Vec<Vec<Index>> = (0..=max_level)
@@ -477,6 +535,15 @@ impl PatchTableFactory {
                             *cv += offset;
                         }
                         PatchKind::Regular(cvs)
+                    } else if let Some(patch) = single_crease
+                        .then(|| single_crease_patch(inner, face))
+                        .flatten()
+                    {
+                        PatchKind::SingleCrease {
+                            cvs: patch.cvs.map(|cv| cv + offset),
+                            edge: patch.edge,
+                            sharpness: patch.sharpness,
+                        }
                     } else if let Some(mut points) = gregory::build(inner, face) {
                         // Irregular neighborhood (extraordinary, boundary,
                         // crease, sharp, dart or non-manifold corners):
@@ -640,7 +707,8 @@ fn quad_cvs(level: &Level, face: usize) -> [Index; 4] {
 ///
 /// Semi-sharp features are never regular: adaptive refinement isolates
 /// them until they decay (or the isolation cap is reached, where they are
-/// capped with Gregory patches).
+/// capped with Gregory patches) — unless single-crease patches cover them
+/// ([`single_crease_patch`]).
 fn is_corner_regular(level: &Level, face: usize, corner: usize) -> bool {
     let v = level.face_vertices(face)[corner] as usize;
     let edges = level.vertex_edges(v);
@@ -734,13 +802,19 @@ pub(super) fn gather_regular_patch(level: &Level, face: usize) -> Option<[Index;
     if fv.len() != 4 {
         return None;
     }
-    let [c0, c1, c2, c3] = [fv[0], fv[1], fv[2], fv[3]];
     for corner in 0..4 {
         if !is_corner_regular(level, face, corner) {
             return None;
         }
     }
+    gather_grid(level, face)
+}
 
+/// Gather the 4x4 control-vertex grid around (quad) `face`, laid out as in
+/// [`gather_regular_patch`], without judging the corners' regularity.
+fn gather_grid(level: &Level, face: usize) -> Option<[Index; 16]> {
+    let fv = level.face_vertices(face);
+    let [c0, c1, c2, c3] = [fv[0], fv[1], fv[2], fv[3]];
     let fe = level.face_edges(face);
     let face = face as Index;
     let mut cvs = [INDEX_INVALID; 16];
@@ -820,6 +894,105 @@ fn gather_corner_cv(level: &Level, a: Option<Index>, c: Index, inner: Index) -> 
     Some(INDEX_INVALID)
 }
 
+/// A regular face with one semi-sharp crease along one of its edges
+/// (`Vtr::Level::isSingleCreasePatch`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SingleCrease {
+    /// The complete 4x4 control-vertex grid, laid out as in
+    /// [`gather_regular_patch`].
+    pub(super) cvs: [Index; 16],
+    /// The face edge carrying the crease (`0..4`, edge `k` joining corners
+    /// `k` and `k + 1`).
+    pub(super) edge: u8,
+    /// The crease's sharpness at the face's level.
+    pub(super) sharpness: f32,
+}
+
+/// Classify `face` as a single-crease patch: an interior quad whose four
+/// corners are valence-4 vertices without vertex sharpness, crossed by a
+/// single straight semi-sharp crease of uniform sharpness running along one
+/// of its edges. Two corners are smooth (no sharp edge at all); the other
+/// two are crease vertices whose only sharp edges are the face edge and its
+/// straight continuation, both of the same sharpness.
+///
+/// Around such a face every mask of the refinement is the tensor product of
+/// the cubic B-spline rule along the crease with a one-dimensional
+/// semi-sharp crease rule across it — under `Uniform` and `Chaikin`
+/// creasing alike, since the crease's sharpness is uniform — so the limit
+/// surface is exactly the patch [`crease_basis`] evaluates.
+pub(super) fn single_crease_patch(level: &Level, face: usize) -> Option<SingleCrease> {
+    let fv = level.face_vertices(face);
+    if fv.len() != 4 {
+        return None;
+    }
+    for &v in fv {
+        let v = v as usize;
+        if level.is_vertex_boundary(v)
+            || level.vertex_edges(v).len() != 4
+            || level.vertex_faces(v).len() != 4
+            || Crease::is_sharp(level.vertex_sharpness(v))
+        {
+            return None;
+        }
+    }
+
+    let fe = level.face_edges(face);
+    let mut crease = None;
+    for (k, &e) in fe.iter().enumerate() {
+        let sharpness = level.edge_sharpness(e as usize);
+        if Crease::is_semi_sharp(sharpness) {
+            if crease.is_some() {
+                return None;
+            }
+            crease = Some((k, sharpness));
+        } else if Crease::is_sharp(sharpness) {
+            return None;
+        }
+    }
+    let (k, sharpness) = crease?;
+    let crease_edge = fe[k] as usize;
+
+    for (corner, &v) in fv.iter().enumerate() {
+        let on_crease = corner == k || corner == (k + 1) % 4;
+        let mut sharp = level
+            .vertex_edges(v as usize)
+            .iter()
+            .map(|&e| e as usize)
+            .filter(|&e| Crease::is_sharp(level.edge_sharpness(e)));
+        if !on_crease {
+            if sharp.next().is_some() {
+                return None;
+            }
+            continue;
+        }
+        // Exactly the crease edge and its straight continuation — the edge
+        // sharing no face with it — both of the crease's sharpness.
+        let others: Vec<usize> = sharp.filter(|&e| e != crease_edge).collect();
+        let [other] = others[..] else {
+            return None;
+        };
+        let crease_faces = level.edge_faces(crease_edge);
+        if level.edge_sharpness(other) != sharpness
+            || level
+                .edge_faces(other)
+                .iter()
+                .any(|f| crease_faces.contains(f))
+        {
+            return None;
+        }
+    }
+
+    let cvs = gather_grid(level, face)?;
+    if cvs.contains(&INDEX_INVALID) {
+        return None;
+    }
+    Some(SingleCrease {
+        cvs,
+        edge: k as u8,
+        sharpness,
+    })
+}
+
 /// Redistribute the weights of phantom (missing boundary) control-vertex
 /// slots onto real slots via the reflection `p = 2a - b`: the B-spline
 /// natural end-condition reproducing sharpened-boundary (crease) behavior,
@@ -864,6 +1037,91 @@ fn fold_phantom_weights(cvs: &[Index; 16], weights: &mut [f32]) {
 /// Uniform cubic B-spline basis functions (and derivatives) over the
 /// central knot interval, `t ∈ [0, 1]`.
 fn bspline_basis(t: f32) -> ([f32; 4], [f32; 4]) {
+    let (b, d) = bspline_basis_f64(f64::from(t));
+    (b.map(|x| x as f32), d.map(|x| x as f32))
+}
+
+/// Basis weights (and derivatives) across a semi-sharp crease of sharpness
+/// `sharpness`: the limit curve over `[p0, p1]`, `t ∈ [0, 1]`, of control
+/// points `(p-1, p0, p1, p2)` whose `p0` carries the crease — the profile of
+/// a single-crease patch (Nießner et al., "Efficient Evaluation of
+/// Semi-Smooth Creases in Catmull-Clark Subdivision Surfaces").
+///
+/// A fractional sharpness `n + f` is the crease rule applied `n` times and
+/// blended with weight `f` at the next step, so the curve is the exact
+/// linear blend of the curves of sharpness `n` and `n + 1`.
+fn crease_basis(t: f32, sharpness: f32) -> ([f32; 4], [f32; 4]) {
+    let n = sharpness.floor();
+    let f = f64::from(sharpness - n);
+    let t = f64::from(t);
+    let (mut w, mut d) = integer_crease_basis(t, n as u32);
+    if f > 0.0 {
+        let (w1, d1) = integer_crease_basis(t, n as u32 + 1);
+        for k in 0..4 {
+            w[k] = (1.0 - f) * w[k] + f * w1[k];
+            d[k] = (1.0 - f) * d[k] + f * d1[k];
+        }
+    }
+    (w.map(|x| x as f32), d.map(|x| x as f32))
+}
+
+/// [`crease_basis`] for an integer sharpness `n`: `n` steps of the crease
+/// rule, then smooth subdivision.
+///
+/// On the side of the crease, `n` crease steps refine the control polygon
+/// exactly as an infinitely sharp crease would — as the B-spline whose
+/// phantom point `2p0 - p1` replaces `p-1` — so beyond `h = 2^-n` the curve
+/// is that of an infinitely sharp crease. Over `[0, h]` it is the B-spline
+/// segment of the refined points at spacing `h`, whose point across the
+/// crease is the true one: `p0 + h (p-1 - p0)`, refined by midpoints only.
+fn integer_crease_basis(t: f64, n: u32) -> ([f64; 4], [f64; 4]) {
+    let (b, db) = bspline_basis_f64(t);
+    if n == 0 {
+        return (b, db);
+    }
+    // Weights on (p-1, p0, p1, p2) of a p0 end with the phantom folded in.
+    let fold = |x: [f64; 4]| [0.0, x[1] + 2.0 * x[0], x[2] - x[0], x[3]];
+    let h = 0.5f64.powi(n as i32);
+    if t >= h {
+        return (fold(b), fold(db));
+    }
+
+    // Refine the window of points at indices -1..=2 around the crease, each
+    // point as weights on (p-1, p0, p1, p2).
+    let mut window = [
+        [0.0, 2.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let mix = |a: &[f64; 4], wa: f64, b: &[f64; 4], wb: f64, c: &[f64; 4], wc: f64| {
+        [0, 1, 2, 3].map(|k| wa * a[k] + wb * b[k] + wc * c[k])
+    };
+    for _ in 0..n {
+        let [q0, q1, q2, q3] = window;
+        window = [
+            mix(&q0, 0.5, &q1, 0.5, &q2, 0.0),
+            mix(&q0, 0.125, &q1, 0.75, &q2, 0.125),
+            mix(&q1, 0.5, &q2, 0.5, &q3, 0.0),
+            mix(&q1, 0.125, &q2, 0.75, &q3, 0.125),
+        ];
+    }
+    window[0] = [h, 1.0 - h, 0.0, 0.0];
+
+    let (b, db) = bspline_basis_f64(t / h);
+    let mut w = [0.0; 4];
+    let mut d = [0.0; 4];
+    for (point, weights) in window.iter().enumerate() {
+        for k in 0..4 {
+            w[k] += b[point] * weights[k];
+            d[k] += db[point] / h * weights[k];
+        }
+    }
+    (w, d)
+}
+
+/// [`bspline_basis`] in double precision.
+fn bspline_basis_f64(t: f64) -> ([f64; 4], [f64; 4]) {
     let t2 = t * t;
     let t3 = t2 * t;
     let one_minus = 1.0 - t;
@@ -880,4 +1138,15 @@ fn bspline_basis(t: f32) -> ([f32; 4], [f32; 4]) {
         0.5 * t2,
     ];
     (basis, deriv)
+}
+
+/// The basis along one parametric direction of a single-crease patch whose
+/// crease lies on the grid line at index 1 (`reversed == false`: `x = 0`)
+/// or 2 (`reversed == true`: `x = 1`) of that direction.
+fn crease_basis_oriented(x: f32, sharpness: f32, reversed: bool) -> ([f32; 4], [f32; 4]) {
+    if !reversed {
+        return crease_basis(x, sharpness);
+    }
+    let (w, d) = crease_basis(1.0 - x, sharpness);
+    ([w[3], w[2], w[1], w[0]], [-d[3], -d[2], -d[1], -d[0]])
 }
