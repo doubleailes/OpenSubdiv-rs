@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the control-vertex stencils down to the base cage; it reproduces
   `PatchTable::evaluate` to floating-point round-off, and accepts
   prebuilt stencil and patch tables for reuse. `TopologyError` gained the
-  variant `LimitLocationInHole` for locations no patch covers.
+  variants `LimitLocationInHole` for locations no patch covers and
+  `PtexFaceOutOfRange` for location arrays naming a ptex face the patch
+  table does not have.
 
 - Patches and feature-adaptive refinement for the Loop scheme
   ([#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12)).

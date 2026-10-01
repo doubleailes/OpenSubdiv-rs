@@ -492,9 +492,53 @@ fn limit_stencils_report_holes() {
         "limit location 1 lies in a hole of ptex face 2"
     );
 
-    // Empty arrays are fine and yield no stencils.
-    let empty = LocationArray::new(1, &[], &[]);
+    // A ptex face the patch table does not have is an error, not a panic.
+    let arrays = [LocationArray::new(6, &[0.5], &[0.5])];
+    let err = LimitStencilTableFactory::create(&refiner, &arrays, None, None).unwrap_err();
+    assert_eq!(
+        err,
+        Error::PtexFaceOutOfRange {
+            ptex_face: 6,
+            num_faces: 6
+        }
+    );
+
+    // Empty arrays are fine and yield no stencils, whatever face they name.
+    let empty = LocationArray::new(99, &[], &[]);
     assert!(empty.is_empty());
     let table = LimitStencilTableFactory::create(&refiner, &[empty], None, None).unwrap();
     assert_eq!(table.num_stencils(), 0);
+    assert_eq!(table.num_control_vertices(), 8);
+}
+
+#[test]
+fn empty_limit_requests_need_no_patch_table() {
+    // An unrefined pentagon has no patch table yet; an empty request must
+    // not fail on that, and must not build one.
+    let verts_per_face = [5usize];
+    let face_verts = [0u32, 1, 2, 3, 4];
+    let descriptor = TopologyDescriptor::new(5, &verts_per_face, &face_verts);
+    let refiner = TopologyRefinerFactory::create(
+        descriptor,
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        PatchTableFactory::create(&refiner).unwrap_err(),
+        Error::PatchesRequireRefinement
+    );
+
+    let table = LimitStencilTableFactory::create(&refiner, &[], None, None).unwrap();
+    assert_eq!(table.num_stencils(), 0);
+    assert_eq!(table.num_control_vertices(), 5);
+    let mut points: Vec<P3> = Vec::new();
+    table.update_values(&[[0.0f32; 3]; 5], &mut points);
+
+    // A non-empty request on it still reports the missing refinement.
+    let arrays = [LocationArray::new(0, &[0.5], &[0.5])];
+    assert_eq!(
+        LimitStencilTableFactory::create(&refiner, &arrays, None, None).unwrap_err(),
+        Error::PatchesRequireRefinement
+    );
 }

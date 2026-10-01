@@ -75,6 +75,14 @@ pub enum TopologyError {
     /// Building patches for a mesh with non-quad faces requires at least one
     /// level of refinement.
     PatchesRequireRefinement,
+    /// A limit stencil was requested on a ptex face the patch table does
+    /// not have.
+    PtexFaceOutOfRange {
+        /// The offending ptex face index.
+        ptex_face: Index,
+        /// The number of ptex faces of the patch table.
+        num_faces: usize,
+    },
     /// A limit stencil was requested at a location lying in a hole, where
     /// no patch covers the limit surface.
     LimitLocationInHole {
@@ -140,6 +148,15 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "patches for meshes with non-quad faces require at least one refinement level"
+                )
+            }
+            TopologyError::PtexFaceOutOfRange {
+                ptex_face,
+                num_faces,
+            } => {
+                write!(
+                    f,
+                    "ptex face {ptex_face} is out of range (the patch table has {num_faces} ptex faces)"
                 )
             }
             TopologyError::LimitLocationInHole {

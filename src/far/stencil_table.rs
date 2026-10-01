@@ -472,9 +472,12 @@ impl LimitStencilTableFactory {
     /// # Errors
     ///
     /// Returns [`TopologyError::PatchesRequireRefinement`] when a patch
-    /// table has to be built for an unrefined mesh with non-quad faces, and
+    /// table has to be built for an unrefined mesh with non-quad faces,
+    /// [`TopologyError::PtexFaceOutOfRange`] when a non-empty location
+    /// array names a ptex face the patch table does not have, and
     /// [`TopologyError::LimitLocationInHole`] when a location lies in a
-    /// hole, where the limit surface is undefined.
+    /// hole, where the limit surface is undefined. A request without any
+    /// location yields an empty table without building either dependency.
     ///
     /// # Panics
     ///
@@ -486,6 +489,32 @@ impl LimitStencilTableFactory {
         cv_stencils: Option<&StencilTable>,
         patch_table: Option<&PatchTable>,
     ) -> Result<LimitStencilTable, TopologyError> {
+        // Validate the request before building anything: an empty request
+        // needs neither table (and must not fail on a mesh no patch table
+        // can be built for yet).
+        let mut num_locations = 0usize;
+        for array in locations {
+            assert_eq!(
+                array.u.len(),
+                array.v.len(),
+                "u and v coordinate arrays must be parallel"
+            );
+            num_locations += array.len();
+        }
+        let num_control_vertices = refiner.level(0).num_vertices();
+        if num_locations == 0 {
+            return Ok(LimitStencilTable {
+                points: StencilTable {
+                    num_control_vertices,
+                    offsets: vec![0],
+                    indices: Vec::new(),
+                    weights: Vec::new(),
+                },
+                du_weights: Vec::new(),
+                dv_weights: Vec::new(),
+            });
+        }
+
         let owned_patches;
         let patch_table = match patch_table {
             Some(table) => table,
@@ -494,6 +523,16 @@ impl LimitStencilTableFactory {
                 &owned_patches
             }
         };
+        let num_ptex_faces = patch_table.ptex_indices().num_faces();
+        for array in locations {
+            if !array.is_empty() && array.ptex_face as usize >= num_ptex_faces {
+                return Err(TopologyError::PtexFaceOutOfRange {
+                    ptex_face: array.ptex_face,
+                    num_faces: num_ptex_faces,
+                });
+            }
+        }
+
         let owned_stencils;
         let cv_stencils = match cv_stencils {
             Some(table) => table,
@@ -510,9 +549,9 @@ impl LimitStencilTableFactory {
             cv_stencils.num_stencils(),
             patch_table.num_control_values()
         );
+        let num_control_vertices = cv_stencils.num_control_vertices();
 
         let map = PatchMap::new(patch_table);
-        let num_locations: usize = locations.iter().map(LocationArray::len).sum();
         let mut offsets = Vec::with_capacity(num_locations + 1);
         let mut indices = Vec::new();
         let mut weights = Vec::new();
@@ -520,14 +559,13 @@ impl LimitStencilTableFactory {
         let mut dv_weights = Vec::new();
         offsets.push(0u32);
 
-        // Per location: weights on the base cage for (point, du, dv).
-        let mut acc: Vec<(Index, [f32; 3])> = Vec::new();
+        // Per location: weights on the base cage for (point, du, dv),
+        // accumulated in a scratch slot per cage vertex; `touched` lists the
+        // slots in use so only those are emitted and reset.
+        let mut scratch = vec![[0.0f32; 3]; num_control_vertices];
+        let mut in_use = vec![false; num_control_vertices];
+        let mut touched: Vec<Index> = Vec::new();
         for array in locations {
-            assert_eq!(
-                array.u.len(),
-                array.v.len(),
-                "u and v coordinate arrays must be parallel"
-            );
             for (&u, &v) in array.u.iter().zip(array.v) {
                 let patch = map.find_patch(array.ptex_face as usize, u, v).ok_or(
                     TopologyError::LimitLocationInHole {
@@ -537,36 +575,36 @@ impl LimitStencilTableFactory {
                 )?;
                 let basis = patch_table.evaluate_basis(patch, u, v);
 
-                acc.clear();
                 for (k, &cv) in basis.indices.iter().enumerate() {
                     let stencil = cv_stencils.stencil(cv as usize);
                     let factors = [basis.weights[k], basis.du_weights[k], basis.dv_weights[k]];
                     for (&index, &w) in stencil.indices.iter().zip(stencil.weights) {
-                        let contribution = factors.map(|f| f * w);
-                        match acc.iter_mut().find(|(i, _)| *i == index) {
-                            Some((_, sum)) => {
-                                for (s, c) in sum.iter_mut().zip(contribution) {
-                                    *s += c;
-                                }
-                            }
-                            None => acc.push((index, contribution)),
+                        if !std::mem::replace(&mut in_use[index as usize], true) {
+                            touched.push(index);
+                        }
+                        for (s, f) in scratch[index as usize].iter_mut().zip(factors) {
+                            *s += f * w;
                         }
                     }
                 }
-                acc.sort_by_key(|&(i, _)| i);
-                for &(index, [w, du, dv]) in &acc {
+                // Sort for deterministic output, then emit and reset.
+                touched.sort_unstable();
+                for &index in &touched {
+                    let [w, du, dv] = std::mem::take(&mut scratch[index as usize]);
+                    in_use[index as usize] = false;
                     indices.push(index);
                     weights.push(w);
                     du_weights.push(du);
                     dv_weights.push(dv);
                 }
+                touched.clear();
                 offsets.push(indices.len() as u32);
             }
         }
 
         Ok(LimitStencilTable {
             points: StencilTable {
-                num_control_vertices: cv_stencils.num_control_vertices(),
+                num_control_vertices,
                 offsets,
                 indices,
                 weights,
