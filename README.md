@@ -118,6 +118,9 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   sharpness, `Uniform` and `Chaikin` crease subdivision, and the transitional
   blending of smooth/crease/corner masks across levels
 - **Boundary interpolation**: `None`, `EdgeOnly`, `EdgeAndCorner`
+- **Triangle subdivision** for Catmark: the standard weights, or the
+  "smooth triangle" rule (`TriangleSubdivision::Smooth`, OpenSubdiv's
+  `TRI_SUB_SMOOTH`, USD's `triangleSubdivisionRule = "smooth"`)
 - **Face-varying channels** (UVs, per-corner colors) with seams, refined in
   lockstep with the geometry, supporting all `FVarLinearInterpolation` rules
   (`All`, `None`, `CornersOnly`, `CornersPlus1`, `CornersPlus2`,
@@ -250,7 +253,6 @@ different depths evaluate the same limit surface.
 Not yet ported (roadmap):
 
 - The `Osd` GPU/compute back-ends
-- `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
 
 ## Minimum supported Rust version
 

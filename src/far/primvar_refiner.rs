@@ -296,10 +296,18 @@ fn interpolate_child_verts_from_edges<T: Primvar>(
             continue;
         }
 
+        // The Catmark smooth-triangle rule (`TriangleSubdivision::Smooth`)
+        // weights an edge differently when a triangle is on either side.
+        let face_size = |i: usize| {
+            edge_faces
+                .get(i)
+                .map_or(0, |&f| parent.face_vertices(f as usize).len())
+        };
         scheme.compute_edge_vertex_mask(
             &EdgeNeighborhood {
                 sharpness: parent.edge_sharpness(e),
                 num_faces: edge_faces.len(),
+                face_vertex_counts: [face_size(0), face_size(1)],
             },
             &mut mask,
         );

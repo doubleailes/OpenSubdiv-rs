@@ -868,3 +868,55 @@ fn reused_value_index_is_independent_at_each_vertex() {
     let pinned2 = refined2[level2.face_fvar_values(18 * 4, 0)[0] as usize];
     assert_close2(pinned2, uvs[9]);
 }
+
+#[test]
+fn fvar_channels_follow_the_smooth_triangle_rule() {
+    // A seamless channel refined under FVarLinearInterpolation::None
+    // behaves exactly like vertex data, so on a quad with a triangle
+    // attached it must apply the Catmark smooth-triangle rule to the shared
+    // edge just as the geometry does.
+    let verts_per_face = [4usize, 3];
+    let face_verts = [0u32, 1, 2, 3, 3, 2, 4];
+    let positions: [[f32; 3]; 5] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.5, 2.0, 0.0],
+    ];
+    let channels = [FVarChannelDescriptor::new(5, &face_verts)];
+    let descriptor =
+        TopologyDescriptor::new(5, &verts_per_face, &face_verts).with_fvar_channels(&channels);
+    let options = sdc::Options::default()
+        .with_fvar_linear_interpolation(sdc::FVarLinearInterpolation::None)
+        .with_triangle_subdivision(sdc::TriangleSubdivision::Smooth);
+    let mut refiner =
+        TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
+    refiner.refine_uniform(UniformOptions::new(1));
+
+    let primvar = PrimvarRefiner::new(&refiner);
+    let mut vdst = vec![[0.0f32; 3]; refiner.level(1).num_vertices()];
+    primvar.interpolate(1, &positions, &mut vdst);
+    let mut fdst = vec![[0.0f32; 3]; refiner.level(1).num_fvar_values(0)];
+    primvar.interpolate_face_varying(1, 0, &positions, &mut fdst);
+    assert_eq!(vdst, fdst);
+
+    // The shared edge's point carries the adjusted weights (0.14 per end
+    // vertex, 0.36 per face point), not plain Catmark's 1/4 everywhere.
+    let shared_edge = refiner.level(0).find_edge(2, 3).unwrap() as usize;
+    let edge_point = refiner.refinement(1).edge_child_vertex(shared_edge) as usize;
+    let f = 0.5 * (0.25 + 0.470);
+    let v = 0.5 * (1.0 - 2.0 * f);
+    let expected = [
+        v * (1.0 + 0.0) + f * (0.5 + 0.5),
+        v * (1.0 + 1.0) + f * (0.5 + 4.0 / 3.0),
+        0.0,
+    ];
+    for (a, e) in fdst[edge_point].iter().zip(&expected) {
+        assert!(
+            (a - e).abs() < 1e-6,
+            "expected {expected:?}, got {:?}",
+            fdst[edge_point]
+        );
+    }
+}

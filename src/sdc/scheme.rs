@@ -19,8 +19,13 @@
 //! Catmark limit masks). See [`EdgeVertexMask::face_weights_for_face_centers`].
 
 use super::crease::{Crease, Rule};
-use super::options::Options;
+use super::options::{Options, TriangleSubdivision};
 use super::types::SchemeType;
+
+/// The per-face weight the Catmark "smooth triangle" rule gives an incident
+/// triangle in an edge-vertex mask (`CATMARK_SMOOTH_TRI_EDGE_WEIGHT`), in
+/// place of the standard 1/4.
+const CATMARK_SMOOTH_TRI_EDGE_WEIGHT: f32 = 0.470;
 
 /// Neighborhood description of an edge, as needed to compute its child
 /// vertex mask.
@@ -31,6 +36,12 @@ pub struct EdgeNeighborhood {
     /// Number of faces incident the edge (1 for a boundary edge, 2 for a
     /// manifold interior edge).
     pub num_faces: usize,
+    /// Number of vertices of each of the first two incident faces
+    /// (`GetNumVerticesPerFace`), in the order of the mask's face weights.
+    /// Only consulted by the Catmark scheme under
+    /// [`TriangleSubdivision::Smooth`], and only for edges with exactly two
+    /// incident faces; entries without a face are ignored and may be zero.
+    pub face_vertex_counts: [usize; 2],
 }
 
 /// Neighborhood description of a vertex, as needed to compute its child
@@ -107,6 +118,7 @@ impl VertexVertexMask {
 pub struct Scheme {
     scheme_type: SchemeType,
     crease: Crease,
+    triangle_subdivision: TriangleSubdivision,
 }
 
 impl Scheme {
@@ -116,12 +128,19 @@ impl Scheme {
         Self {
             scheme_type,
             crease: Crease::new(options),
+            triangle_subdivision: options.triangle_subdivision,
         }
     }
 
     /// The subdivision scheme these rules apply.
     pub fn scheme_type(&self) -> SchemeType {
         self.scheme_type
+    }
+
+    /// The triangle-subdivision rule these rules apply (only meaningful for
+    /// the Catmark scheme).
+    pub fn triangle_subdivision(&self) -> TriangleSubdivision {
+        self.triangle_subdivision
     }
 
     /// The creasing queries derived from this scheme's options.
@@ -175,9 +194,10 @@ impl Scheme {
         match self.scheme_type {
             SchemeType::Catmark => {
                 // Smooth mask: 1/4 to each end vertex, the remaining 1/2
-                // distributed over the incident faces' child vertices.
-                let f_weight = 0.5 / edge.num_faces as f32;
-                let vw = crease_weight * 0.5 + smooth_weight * 0.25;
+                // distributed over the incident faces' child vertices —
+                // unless the smooth-triangle rule adjusts the split.
+                let (v_weight, f_weight) = self.catmark_smooth_edge_weights(edge);
+                let vw = crease_weight * 0.5 + smooth_weight * v_weight;
                 mask.vertex_weights = [vw, vw];
                 mask.face_weights
                     .resize(edge.num_faces, smooth_weight * f_weight);
@@ -191,6 +211,36 @@ impl Scheme {
             }
             SchemeType::Bilinear => unreachable!(),
         }
+    }
+
+    /// The (end-vertex, per-face) weights of the smooth Catmark edge-vertex
+    /// mask (`Scheme<SCHEME_CATMARK>::assignSmoothMaskForEdge`).
+    ///
+    /// Under [`TriangleSubdivision::Smooth`], an interior edge with a
+    /// triangle on either side uses the "smooth triangle" adjustment of
+    /// Catmull and Clark's original paper: each incident triangle
+    /// contributes [`CATMARK_SMOOTH_TRI_EDGE_WEIGHT`] instead of 1/4, the two
+    /// face weights are averaged, and the end vertices share the remainder.
+    /// This removes the pinching plain Catmark produces at triangles inside
+    /// a quad mesh. The order of operations mirrors OpenSubdiv (and Hbr) so
+    /// the weights match bit for bit.
+    fn catmark_smooth_edge_weights(&self, edge: &EdgeNeighborhood) -> (f32, f32) {
+        if self.triangle_subdivision == TriangleSubdivision::Smooth && edge.num_faces == 2 {
+            let [face0_is_tri, face1_is_tri] = edge.face_vertex_counts.map(|n| n == 3);
+            if face0_is_tri || face1_is_tri {
+                let tri_weight = |is_tri: bool| {
+                    if is_tri {
+                        CATMARK_SMOOTH_TRI_EDGE_WEIGHT
+                    } else {
+                        0.25
+                    }
+                };
+                let f_weight = 0.5 * (tri_weight(face0_is_tri) + tri_weight(face1_is_tri));
+                let v_weight = 0.5 * (1.0 - 2.0 * f_weight);
+                return (v_weight, f_weight);
+            }
+        }
+        (0.25, 0.5 / edge.num_faces as f32)
     }
 
     // ------------------------------------------------------------------
@@ -434,6 +484,7 @@ mod tests {
             &EdgeNeighborhood {
                 sharpness: 0.0,
                 num_faces: 2,
+                face_vertex_counts: [4, 4],
             },
             &mut mask,
         );
@@ -450,6 +501,7 @@ mod tests {
             &EdgeNeighborhood {
                 sharpness: 0.0,
                 num_faces: 2,
+                face_vertex_counts: [4, 4],
             },
             &mut mask,
         );
@@ -466,12 +518,136 @@ mod tests {
             &EdgeNeighborhood {
                 sharpness: 0.5,
                 num_faces: 2,
+                face_vertex_counts: [4, 4],
             },
             &mut mask,
         );
         // 0.5 * (0.5, 0.5) + 0.5 * (0.25, 0.25, f: 0.25, 0.25)
         assert_eq!(mask.vertex_weights, [0.375, 0.375]);
         assert_eq!(mask.face_weights, vec![0.125, 0.125]);
+    }
+
+    fn catmark_edge_mask(options: Options, edge: EdgeNeighborhood) -> EdgeVertexMask {
+        let mut mask = EdgeVertexMask::default();
+        Scheme::new(SchemeType::Catmark, options).compute_edge_vertex_mask(&edge, &mut mask);
+        mask
+    }
+
+    #[test]
+    fn smooth_triangle_rule_adjusts_edge_between_quad_and_triangle() {
+        let smooth = Options::default().with_triangle_subdivision(TriangleSubdivision::Smooth);
+        let mask = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [4, 3],
+            },
+        );
+        // f = (1/4 + 0.470) / 2 = 0.36; v = (1 - 2 f) / 2 = 0.14.
+        let f = 0.5 * (0.25 + 0.470);
+        let v = 0.5 * (1.0 - 2.0 * f);
+        assert_eq!(mask.vertex_weights, [v, v]);
+        assert_eq!(mask.face_weights, vec![f, f]);
+        assert!(mask.face_weights_for_face_centers);
+
+        // The triangle may sit on either side of the edge.
+        let flipped = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [3, 4],
+            },
+        );
+        assert_eq!(flipped.vertex_weights, mask.vertex_weights);
+        assert_eq!(flipped.face_weights, mask.face_weights);
+
+        // Two triangles: each face takes the full 0.470.
+        let both = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [3, 3],
+            },
+        );
+        let v = 0.5 * (1.0 - 2.0 * 0.470);
+        assert_eq!(both.vertex_weights, [v, v]);
+        assert_eq!(both.face_weights, vec![0.470, 0.470]);
+    }
+
+    #[test]
+    fn smooth_triangle_rule_leaves_other_edges_alone() {
+        let smooth = Options::default().with_triangle_subdivision(TriangleSubdivision::Smooth);
+
+        // No triangle: the standard weights.
+        let quads = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [4, 4],
+            },
+        );
+        assert_eq!(quads.vertex_weights, [0.25, 0.25]);
+        assert_eq!(quads.face_weights, vec![0.25, 0.25]);
+
+        // A smooth boundary edge of a triangle (one incident face): the
+        // rule only applies to edges with two faces.
+        let boundary = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 1,
+                face_vertex_counts: [3, 0],
+            },
+        );
+        assert_eq!(boundary.vertex_weights, [0.25, 0.25]);
+        assert_eq!(boundary.face_weights, vec![0.5]);
+
+        // Under the default rule, triangles get the standard weights.
+        let catmark = catmark_edge_mask(
+            Options::default(),
+            EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [4, 3],
+            },
+        );
+        assert_eq!(catmark.vertex_weights, [0.25, 0.25]);
+        assert_eq!(catmark.face_weights, vec![0.25, 0.25]);
+
+        // Loop ignores the option entirely.
+        let mut mask = EdgeVertexMask::default();
+        Scheme::new(SchemeType::Loop, smooth).compute_edge_vertex_mask(
+            &EdgeNeighborhood {
+                sharpness: 0.0,
+                num_faces: 2,
+                face_vertex_counts: [3, 3],
+            },
+            &mut mask,
+        );
+        assert_eq!(mask.vertex_weights, [0.375, 0.375]);
+        assert_eq!(mask.face_weights, vec![0.125, 0.125]);
+    }
+
+    #[test]
+    fn smooth_triangle_rule_blends_with_semi_sharp_crease() {
+        let smooth = Options::default().with_triangle_subdivision(TriangleSubdivision::Smooth);
+        let mask = catmark_edge_mask(
+            smooth,
+            EdgeNeighborhood {
+                sharpness: 0.5,
+                num_faces: 2,
+                face_vertex_counts: [4, 3],
+            },
+        );
+        // 0.5 * (0.5, 0.5) + 0.5 * (0.14, 0.14, f: 0.36, 0.36)
+        let f = 0.5 * (0.25 + 0.470);
+        let v = 0.5 * (1.0 - 2.0 * f);
+        assert_eq!(mask.vertex_weights, [0.5 * 0.5 + 0.5 * v; 2]);
+        assert_eq!(mask.face_weights, vec![0.5 * f; 2]);
     }
 
     #[test]
