@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Catmark "smooth triangle" rule, `TriangleSubdivision::Smooth`
+  (OpenSubdiv's `TRI_SUB_SMOOTH`, USD's `triangleSubdivisionRule =
+  "smooth"`), which was accepted but silently refined as `Catmark`
+  ([#14](https://github.com/doubleailes/OpenSubdiv-rs/issues/14)). As in
+  OpenSubdiv, an interior edge with a triangle on either side now gives
+  each incident triangle's face point 0.470 instead of 1/4, averages the
+  two face weights and leaves the remainder to the end vertices; face
+  points, vertex points, boundary edges and the `Catmark` rule are
+  unchanged. Face-varying channels and stencil tables follow the rule
+  through the shared refinement masks. `Scheme::triangle_subdivision`
+  reports the rule in effect.
+
 - Stencil tables for adaptively refined hierarchies and limit stencils
   over the patch table
   ([#13](https://github.com/doubleailes/OpenSubdiv-rs/issues/13)).
@@ -71,6 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `sdc::EdgeNeighborhood` gained the public field `face_vertex_counts`
+  (the number of vertices of each of the first two incident faces), which
+  the smooth-triangle rule inspects; code building it with a struct
+  literal must set the field.
 - `StencilTableFactory::create` no longer panics on adaptively refined
   refiners. `StencilTableFactory::create_limit` (the limit of the last
   level's vertices) still requires uniform refinement, as its sparse last

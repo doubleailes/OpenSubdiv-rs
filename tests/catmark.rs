@@ -310,3 +310,143 @@ fn interpolate_all_convenience() {
     assert_eq!(levels[1].len(), 98);
     assert_eq!(levels[2].len(), refiner.level(3).num_vertices());
 }
+
+/// A quad with a triangle attached along its top edge, the smallest mesh
+/// where the Catmark smooth-triangle rule acts:
+///
+/// ```text
+///        4
+///       / \
+///      3 - 2
+///      |   |
+///      0 - 1
+/// ```
+const HOUSE_VERTS_PER_FACE: [usize; 2] = [4, 3];
+const HOUSE_FACE_VERTS: [u32; 7] = [0, 1, 2, 3, 3, 2, 4];
+const HOUSE_POSITIONS: [P3; 5] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.5, 2.0, 0.0],
+];
+
+fn house_refiner(options: sdc::Options, levels: usize) -> opensubdiv_rs::far::TopologyRefiner {
+    let descriptor = TopologyDescriptor::new(5, &HOUSE_VERTS_PER_FACE, &HOUSE_FACE_VERTS);
+    let mut refiner =
+        TopologyRefinerFactory::create(descriptor, sdc::SchemeType::Catmark, options).unwrap();
+    refiner.refine_uniform(UniformOptions::new(levels));
+    refiner
+}
+
+fn refine_once(refiner: &opensubdiv_rs::far::TopologyRefiner, base: &[P3]) -> Vec<P3> {
+    let primvar = PrimvarRefiner::new(refiner);
+    let mut dst = vec![[0.0f32; 3]; refiner.level(1).num_vertices()];
+    primvar.interpolate(1, base, &mut dst);
+    dst
+}
+
+#[test]
+fn smooth_triangle_rule_adjusts_edge_between_quad_and_triangle() {
+    let catmark = house_refiner(sdc::Options::default(), 1);
+    let smooth = house_refiner(
+        sdc::Options::default().with_triangle_subdivision(sdc::TriangleSubdivision::Smooth),
+        1,
+    );
+    let catmark_level1 = refine_once(&catmark, &HOUSE_POSITIONS);
+    let smooth_level1 = refine_once(&smooth, &HOUSE_POSITIONS);
+
+    let shared_edge = catmark.level(0).find_edge(2, 3).unwrap() as usize;
+    assert_eq!(
+        smooth.level(0).find_edge(2, 3).unwrap() as usize,
+        shared_edge
+    );
+    let edge_point = catmark.refinement(1).edge_child_vertex(shared_edge) as usize;
+
+    // The face points: the centroids of the quad and of the triangle.
+    let quad_point = [0.5, 0.5, 0.0];
+    let tri_point = [0.5, 4.0 / 3.0, 0.0];
+
+    // Plain Catmark: 1/4 to each end vertex and 1/4 to each face point.
+    assert_close(
+        catmark_level1[edge_point],
+        [
+            0.25 * (1.0 + 0.0) + 0.25 * (quad_point[0] + tri_point[0]),
+            0.25 * (1.0 + 1.0) + 0.25 * (quad_point[1] + tri_point[1]),
+            0.0,
+        ],
+    );
+
+    // Smooth triangles: the triangle's face point weighs 0.470 and the
+    // quad's 1/4, averaged to 0.36 each, leaving 0.14 per end vertex.
+    let f = 0.5 * (0.25 + 0.470);
+    let v = 0.5 * (1.0 - 2.0 * f);
+    assert_close(
+        smooth_level1[edge_point],
+        [
+            v * (1.0 + 0.0) + f * (quad_point[0] + tri_point[0]),
+            v * (1.0 + 1.0) + f * (quad_point[1] + tri_point[1]),
+            0.0,
+        ],
+    );
+    assert!(smooth_level1[edge_point][1] < catmark_level1[edge_point][1]);
+
+    // Every other child vertex — the face points, the boundary (creased)
+    // edge points and the vertex points — is untouched by the rule.
+    for (i, (a, b)) in catmark_level1.iter().zip(&smooth_level1).enumerate() {
+        if i != edge_point {
+            assert_eq!(a, b, "child vertex {i} differs");
+        }
+    }
+    assert_close(smooth_level1[0], quad_point);
+    assert_close(smooth_level1[1], tri_point);
+}
+
+#[test]
+fn smooth_triangle_rule_is_identity_on_quad_meshes() {
+    // Without triangles, the smooth rule must refine bit-identically to
+    // plain Catmark, at every level.
+    let catmark = cube_refiner(sdc::Options::default(), 3);
+    let smooth = cube_refiner(
+        sdc::Options::default().with_triangle_subdivision(sdc::TriangleSubdivision::Smooth),
+        3,
+    );
+    let catmark_levels = PrimvarRefiner::new(&catmark).interpolate_all(&CUBE_POSITIONS);
+    let smooth_levels = PrimvarRefiner::new(&smooth).interpolate_all(&CUBE_POSITIONS);
+    assert_eq!(catmark_levels, smooth_levels);
+}
+
+#[test]
+fn smooth_triangle_rule_only_acts_at_the_base_level() {
+    // After one refinement every face is a quad, so levels beyond the first
+    // apply the standard masks to the (different) level-1 points: refining
+    // the level-1 mesh of the smooth rule as plain Catmark reproduces level 2.
+    let smooth = house_refiner(
+        sdc::Options::default().with_triangle_subdivision(sdc::TriangleSubdivision::Smooth),
+        2,
+    );
+    let levels = PrimvarRefiner::new(&smooth).interpolate_all(&HOUSE_POSITIONS);
+
+    let level1 = smooth.level(1);
+    let verts_per_face: Vec<usize> = (0..level1.num_faces())
+        .map(|f| level1.face_vertices(f).len())
+        .collect();
+    let face_verts: Vec<u32> = (0..level1.num_faces())
+        .flat_map(|f| level1.face_vertices(f).iter().copied())
+        .collect();
+    assert!(verts_per_face.iter().all(|&n| n == 4));
+    let descriptor = TopologyDescriptor::new(level1.num_vertices(), &verts_per_face, &face_verts);
+    let mut replay = TopologyRefinerFactory::create(
+        descriptor,
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+    )
+    .unwrap();
+    replay.refine_uniform(UniformOptions::new(1));
+    let replayed = refine_once(&replay, &levels[0]);
+
+    assert_eq!(replayed.len(), levels[1].len());
+    for (a, b) in replayed.iter().zip(&levels[1]) {
+        assert_close(*a, *b);
+    }
+}

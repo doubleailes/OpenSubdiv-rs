@@ -66,7 +66,15 @@ pub enum TriangleSubdivision {
     #[default]
     Catmark,
     /// The "smooth triangle" weight adjustment of the original Catmull-Clark
-    /// paper. Not yet implemented in this port (treated as `Catmark`).
+    /// paper (`TRI_SUB_SMOOTH`): the child vertex of an interior edge with a
+    /// triangle on either side takes more of its position from the incident
+    /// face points (0.470 per triangle instead of 1/4) and less from the
+    /// edge's end vertices, removing the pinching plain Catmark produces at
+    /// triangles inside a quad mesh. Face points and vertex points are not
+    /// affected, and the rule only acts at the base level: after one
+    /// refinement every face is a quad.
+    ///
+    /// This is USD's `triangleSubdivisionRule = "smooth"`.
     Smooth,
 }
 
