@@ -75,6 +75,15 @@ pub enum TopologyError {
     /// Building patches for a mesh with non-quad faces requires at least one
     /// level of refinement.
     PatchesRequireRefinement,
+    /// A limit stencil was requested at a location lying in a hole, where
+    /// no patch covers the limit surface.
+    LimitLocationInHole {
+        /// The ptex face of the offending location.
+        ptex_face: Index,
+        /// Position of the location across all requested location arrays,
+        /// i.e. the index its stencil would have had.
+        location: usize,
+    },
 }
 
 impl std::fmt::Display for TopologyError {
@@ -131,6 +140,15 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "patches for meshes with non-quad faces require at least one refinement level"
+                )
+            }
+            TopologyError::LimitLocationInHole {
+                ptex_face,
+                location,
+            } => {
+                write!(
+                    f,
+                    "limit location {location} lies in a hole of ptex face {ptex_face}"
                 )
             }
         }

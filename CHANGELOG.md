@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stencil tables for adaptively refined hierarchies and limit stencils
+  over the patch table
+  ([#13](https://github.com/doubleailes/OpenSubdiv-rs/issues/13)).
+  `StencilTableFactory::create` now accepts feature-adaptive refiners,
+  producing stencils for the vertices of every sparse level in the order
+  `PrimvarRefiner::interpolate` computes them;
+  `StencilTableOptions::for_patch_controls` names the options whose table
+  fills a `PatchTable`'s concatenated control buffer in one
+  `update_values` pass. The new `LimitStencilTableFactory::create` builds
+  a `LimitStencilTable` of limit stencils — position and first derivatives
+  — at arbitrary `(ptex face, u, v)` locations given as `LocationArray`s,
+  by factorizing the covering patch's basis weights (B-spline,
+  single-crease, Gregory, box-spline, Gregory triangle or linear) through
+  the control-vertex stencils down to the base cage; it reproduces
+  `PatchTable::evaluate` to floating-point round-off, and accepts
+  prebuilt stencil and patch tables for reuse. `TopologyError` gained the
+  variant `LimitLocationInHole` for locations no patch covers.
+
 - Patches and feature-adaptive refinement for the Loop scheme
   ([#12](https://github.com/doubleailes/OpenSubdiv-rs/issues/12)).
   `PatchTableFactory::create` now builds patch tables for Loop refiners:
@@ -51,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `StencilTableFactory::create` no longer panics on adaptively refined
+  refiners. `StencilTableFactory::create_limit` (the limit of the last
+  level's vertices) still requires uniform refinement, as its sparse last
+  level lacks complete neighborhoods; its panic message now points to
+  `LimitStencilTableFactory`.
 - `PatchParam` gained the public field `triangular` (true for the Loop
   scheme's patches); `PatchParam::is_triangle_rotated` is false for every
   quad patch, including those in the third quadrant of their ptex face.

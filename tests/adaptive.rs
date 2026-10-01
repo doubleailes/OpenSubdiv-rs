@@ -6,7 +6,8 @@
 
 use opensubdiv_rs::far::{
     AdaptiveOptions, PatchMap, PatchTable, PatchTableFactory, PatchType, PrimvarRefiner,
-    TopologyDescriptor, TopologyRefiner, TopologyRefinerFactory, UniformOptions,
+    StencilTableFactory, StencilTableOptions, TopologyDescriptor, TopologyRefiner,
+    TopologyRefinerFactory, UniformOptions,
 };
 use opensubdiv_rs::sdc;
 
@@ -300,8 +301,10 @@ fn adaptive_bilinear_isolates_non_quads_once() {
 }
 
 #[test]
-#[should_panic(expected = "stencil tables require uniform refinement")]
-fn stencils_reject_adaptive_refiners() {
+fn stencils_cover_adaptive_hierarchies() {
+    // Stencils for the sparse levels of an adaptive refiner reproduce the
+    // level-by-level interpolation, and with control vertices included
+    // they fill the patch table's control buffer in one pass.
     let descriptor = TopologyDescriptor::new(8, &CUBE_VERTS_PER_FACE, &CUBE_FACE_VERTS);
     let mut refiner = TopologyRefinerFactory::create(
         descriptor,
@@ -309,9 +312,18 @@ fn stencils_reject_adaptive_refiners() {
         sdc::Options::default(),
     )
     .unwrap();
-    refiner.refine_adaptive(AdaptiveOptions::new(2));
-    let _ = opensubdiv_rs::far::StencilTableFactory::create(
-        &refiner,
-        opensubdiv_rs::far::StencilTableOptions::default(),
-    );
+    refiner.refine_adaptive(AdaptiveOptions::new(3));
+    assert!(refiner.is_adaptive());
+
+    let table = StencilTableFactory::create(&refiner, StencilTableOptions::for_patch_controls());
+    let patches = PatchTableFactory::create(&refiner).unwrap();
+    assert_eq!(table.num_stencils(), patches.num_control_values());
+    assert_eq!(table.num_control_vertices(), 8);
+
+    let mut values = vec![[0.0f32; 3]; table.num_stencils()];
+    table.update_values(&CUBE_POSITIONS, &mut values);
+    let expected = patch_controls(&refiner, &CUBE_POSITIONS);
+    for (a, e) in values.iter().zip(&expected) {
+        assert_close(*a, *e, 1e-6);
+    }
 }

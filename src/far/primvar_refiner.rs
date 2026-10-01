@@ -171,7 +171,7 @@ impl<'a> PrimvarRefiner<'a> {
     pub fn limit<T: Primvar>(&self, src: &[T], dst: &mut [T]) {
         assert!(
             !self.refiner.is_adaptive(),
-            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable"
+            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable or LimitStencilTable"
         );
         limit_level(
             self.refiner.scheme(),
@@ -188,7 +188,7 @@ impl<'a> PrimvarRefiner<'a> {
     pub fn limit_face_varying<T: Primvar>(&self, channel: usize, src: &[T], dst: &mut [T]) {
         assert!(
             !self.refiner.is_adaptive(),
-            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable"
+            "Limit requires uniform refinement; evaluate adaptive refiners through a PatchTable or LimitStencilTable"
         );
         let fvar = self.refiner.fvar_channel(channel);
         let max_level = self.refiner.max_level();
