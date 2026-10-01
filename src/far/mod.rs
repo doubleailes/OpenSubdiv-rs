@@ -16,7 +16,11 @@
 //!   face-varying channels (UVs) declared on the descriptor.
 //! * [`StencilTable`] / [`StencilTableFactory`] — factorize the whole
 //!   refinement (or limit evaluation) into flat per-vertex stencils on the
-//!   base-level control vertices.
+//!   base-level control vertices, for uniform and adaptive hierarchies
+//!   alike; [`LimitStencilTable`] / [`LimitStencilTableFactory`] — limit
+//!   stencils (position and first derivatives) at arbitrary
+//!   `(ptex face, u, v)` locations, factorized through the patch table
+//!   down to the base cage.
 //! * [`PatchTable`] / [`PatchTableFactory`] / [`PatchMap`] — parametric
 //!   patches covering the limit surface (B-spline and Gregory patches for
 //!   Catmark, box-spline and Gregory triangle patches for Loop), located
@@ -37,7 +41,10 @@ pub use fvar::FVarChannel;
 pub use patch_table::{PatchBasis, PatchMap, PatchParam, PatchTable, PatchTableFactory, PatchType};
 pub use primvar_refiner::{Primvar, PrimvarRefiner};
 pub use ptex::PtexIndices;
-pub use stencil_table::{Stencil, StencilTable, StencilTableFactory, StencilTableOptions};
+pub use stencil_table::{
+    LimitStencil, LimitStencilTable, LimitStencilTableFactory, LocationArray, Stencil,
+    StencilTable, StencilTableFactory, StencilTableOptions,
+};
 pub use topology_descriptor::{FVarChannelDescriptor, TopologyDescriptor};
 pub use topology_refiner::{
     AdaptiveOptions, TopologyLevel, TopologyRefiner, TopologyRefinerFactory, UniformOptions,

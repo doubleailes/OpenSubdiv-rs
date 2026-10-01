@@ -314,10 +314,13 @@ impl TopologyRefiner {
     /// deep a level is requested.
     ///
     /// Patches for an adaptively refined mesh live at mixed depths — build
-    /// a [`super::PatchTable`] to evaluate the limit surface.
-    /// [`super::PrimvarRefiner::interpolate`] works level by level as
-    /// usual; [`super::PrimvarRefiner::limit`] and stencil tables require
-    /// uniform refinement.
+    /// a [`super::PatchTable`] to evaluate the limit surface, or a
+    /// [`super::LimitStencilTable`] to evaluate it straight from the base
+    /// cage. [`super::PrimvarRefiner::interpolate`] and
+    /// [`super::StencilTableFactory::create`] work level by level as
+    /// usual; [`super::PrimvarRefiner::limit`] and
+    /// [`super::StencilTableFactory::create_limit`] — the limit of the
+    /// last level's vertices — require uniform refinement.
     ///
     /// For the Loop scheme the same isolation applies to triangles: faces
     /// whose three corners are regular (interior valence 6, regular

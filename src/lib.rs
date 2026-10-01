@@ -75,7 +75,9 @@
 //! depends on traversal order internals.
 //!
 //! Face-varying channels (UVs with seams, all `FVarLinearInterpolation`
-//! rules), stencil tables ([`far::StencilTable`]), patch tables
+//! rules), stencil tables ([`far::StencilTable`], for uniform and adaptive
+//! hierarchies, and [`far::LimitStencilTable`], evaluating the limit
+//! surface at arbitrary parametric locations from the base cage), patch tables
 //! ([`far::PatchTable`], for parametric limit evaluation with derivatives:
 //! B-spline patches and Gregory end caps for Catmark, box-spline patches
 //! and Gregory triangles for Loop, at extraordinary vertices and on

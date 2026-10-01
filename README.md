@@ -22,7 +22,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 |--------|------------------|----------|
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform or sparse quad/tri refinement |
-| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
+| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, `LimitStencilTable` / `LimitStencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
 
 ## Installation
 
@@ -125,7 +125,16 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
 - **Stencil tables** (`StencilTable` / `StencilTableFactory`): the whole
   refinement — or the limit evaluation — factorized into flat per-vertex
   stencils on the base control vertices, for fast re-posing of animated
-  meshes via `update_values`
+  meshes via `update_values`; uniform and feature-adaptive hierarchies
+  alike, with `StencilTableOptions::for_patch_controls` filling a patch
+  table's whole control buffer in one pass
+- **Limit stencils** (`LimitStencilTable` / `LimitStencilTableFactory`):
+  the limit surface — position and first derivatives — at arbitrary
+  `(ptex face, u, v)` locations as sparse stencils on the base cage,
+  obtained by factorizing the patch table's basis weights through the
+  control-vertex stencils. One sparse dot product per sample, no per-level
+  buffers, and the stencils are topology-only, so a deforming cage reuses
+  them across frames
 - **Limit-surface evaluation** of vertex positions (`PrimvarRefiner::limit`),
   including crease and corner limit rules
 - **Patch tables** (`PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices`):
@@ -240,7 +249,6 @@ different depths evaluate the same limit surface.
 
 Not yet ported (roadmap):
 
-- Stencil tables for adaptively refined hierarchies
 - The `Osd` GPU/compute back-ends
 - `TRI_SUB_SMOOTH` triangle-subdivision option for Catmark
 
