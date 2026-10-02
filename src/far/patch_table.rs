@@ -942,8 +942,10 @@ impl PatchTable {
     }
 
     /// The [`TopologyRefiner`]'s index of table channel `channel`: the
-    /// channel's position in [`PatchTableOptions::fvar_channels`], or the
-    /// channel itself when the table was built for every channel.
+    /// entry at position `channel` of [`PatchTableOptions::fvar_channels`]
+    /// (`fvarChannelIndices[channel]`), or `channel` itself when the table
+    /// was built for every channel. With channels `&[2, 0]`, table channel
+    /// 0 is refiner channel 2.
     pub fn fvar_refiner_channel(&self, channel: usize) -> usize {
         self.fvar(channel).channel
     }
