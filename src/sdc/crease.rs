@@ -119,22 +119,24 @@ impl Crease {
         }
 
         // Chaikin creasing: blend the edge's sharpness with the average
-        // sharpness of the *other* sharp edges around the shared vertex
-        // (3/4 self + 1/4 neighbor average), then decrement.
+        // sharpness of the *other* semi-sharp edges around the shared vertex
+        // (3/4 self + 1/4 neighbor average), then decrement. Infinitely sharp
+        // neighbors (boundary edges, infinite creases, non-manifold edges) do
+        // not take part in the average; without semi-sharp neighbors the
+        // sharpness is simply decremented.
         let mut sharp_sum = 0.0f32;
         let mut sharp_count = 0u32;
         for &s in incident_edge_sharpness {
-            if Self::is_sharp(s) {
+            if Self::is_semi_sharp(s) {
                 sharp_sum += s;
                 sharp_count += 1;
             }
         }
-        // Exclude the subject edge itself from the neighbor average:
-        sharp_sum -= edge_sharpness;
-        sharp_count -= 1;
 
-        let blended = if sharp_count > 0 {
-            0.75 * edge_sharpness + 0.25 * (sharp_sum / sharp_count as f32)
+        let blended = if sharp_count > 1 {
+            // Exclude the subject edge itself from the neighbor average:
+            let avg = (sharp_sum - edge_sharpness) / (sharp_count - 1) as f32;
+            0.75 * edge_sharpness + 0.25 * avg
         } else {
             edge_sharpness
         };
@@ -239,6 +241,27 @@ mod tests {
         // Edge of sharpness 2 meeting one other sharp edge (sharpness 4) and
         // two smooth edges: 0.75*2 + 0.25*4 - 1 = 1.5
         let s = c.subdivide_edge_sharpness_at_vertex(2.0, &[2.0, 4.0, 0.0, 0.0]);
+        assert!((s - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chaikin_ignores_infinitely_sharp_neighbors() {
+        let opts = Options::default().with_creasing_method(CreasingMethod::Chaikin);
+        let c = Crease::new(opts);
+        // Edge of sharpness 2 at a boundary vertex whose two other edges are
+        // infinitely sharp boundary edges: no semi-sharp neighbor, so the
+        // sharpness is simply decremented (2 - 1 = 1), as in OpenSubdiv.
+        let s = c.subdivide_edge_sharpness_at_vertex(
+            2.0,
+            &[2.0, SHARPNESS_INFINITE, SHARPNESS_INFINITE],
+        );
+        assert!((s - 1.0).abs() < 1e-6);
+        // Infinite neighbors are skipped, semi-sharp ones still average:
+        // 0.75*2 + 0.25*4 - 1 = 1.5
+        let s = c.subdivide_edge_sharpness_at_vertex(
+            2.0,
+            &[2.0, SHARPNESS_INFINITE, 4.0, 0.0, SHARPNESS_INFINITE],
+        );
         assert!((s - 1.5).abs() < 1e-6);
     }
 

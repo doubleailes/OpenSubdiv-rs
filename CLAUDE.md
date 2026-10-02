@@ -59,7 +59,7 @@ The modules mirror OpenSubdiv's layers one-to-one, and the doc comments name the
 
 ### Tests
 
-The integration tests in `tests/` are grouped by feature (catmark, loop, fvar, fvar_patch, adaptive, patch, endcaps, single_crease, loop_patch, stencil, nonmanifold, selected_faces). Each file defines its own fixtures (such as the far-tutorial cube) and its own `assert_close` helper; there is no shared `common` module. The main checks are:
+The integration tests in `tests/` are grouped by feature (catmark, chaikin, loop, fvar, fvar_patch, adaptive, patch, endcaps, single_crease, loop_patch, stencil, nonmanifold, selected_faces). Each file defines its own fixtures (such as the far-tutorial cube) and its own `assert_close` helper; there is no shared `common` module. The main checks are:
 
 - The Gregory and Loop caps reduce to the exact B-spline or box-spline patch on regular neighborhoods, for arbitrary control data.
 - Adaptive and uniform evaluation agree on the same mesh.
