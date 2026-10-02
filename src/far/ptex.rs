@@ -29,14 +29,21 @@ impl PtexIndices {
     pub fn new(refiner: &TopologyRefiner) -> Self {
         let base = refiner.level(0);
         let regular_size = refiner.scheme_type().regular_face_size();
+        let ptex_count = |f: usize| {
+            let size = base.face_vertices(f).len();
+            if size == regular_size {
+                1
+            } else {
+                size
+            }
+        };
+        let num_ptex = (0..base.num_faces()).map(ptex_count).sum();
         let mut offsets = Vec::with_capacity(base.num_faces() + 1);
-        let mut base_faces = Vec::new();
-        let mut corners = Vec::new();
+        let mut base_faces = Vec::with_capacity(num_ptex);
+        let mut corners = Vec::with_capacity(num_ptex);
         offsets.push(0);
         for f in 0..base.num_faces() {
-            let size = base.face_vertices(f).len();
-            let count = if size == regular_size { 1 } else { size };
-            for k in 0..count {
+            for k in 0..ptex_count(f) {
                 base_faces.push(f as Index);
                 corners.push(k as u16);
             }

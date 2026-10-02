@@ -127,6 +127,13 @@ pub struct PatchParam {
 }
 
 impl PatchParam {
+    /// The deepest [`depth`](Self::depth) a [`PatchTable`] stores: its
+    /// parameters are packed into 8 bytes, as OpenSubdiv packs its own
+    /// (whose depth stops at 10). Adaptive refinement never goes deeper
+    /// than [`AdaptiveOptions::MAX_ISOLATION_LEVEL`](super::AdaptiveOptions::MAX_ISOLATION_LEVEL);
+    /// [`PatchTableFactory::create`] rejects uniform refinement past it.
+    pub const MAX_DEPTH: u8 = 12;
+
     /// Convert ptex-face coordinates to the patch's local `(s, t)`
     /// (`PatchParam::Normalize`).
     pub fn normalize(&self, u: f32, v: f32) -> (f32, f32) {
@@ -164,6 +171,58 @@ impl PatchParam {
     }
 }
 
+/// A [`PatchParam`] packed into 8 bytes (`Far::PatchParam`'s role): the
+/// ptex face in the low 32 bits, then the depth (4 bits), the rotation (2),
+/// the triangle flag (1) and the integer cell `(u, v)` the patch occupies
+/// in its ptex face's `2^depth`-square grid (12 bits each).
+///
+/// The cell, rather than the origin, is what fits in `depth` bits: the
+/// origin is the cell's corner [`CORNER_UV`]`[rotation]`, for quads at any
+/// rotation and for triangles alike (an inverted triangle is the upper-right
+/// half of its cell). Origins are exact multiples of `2^-depth`, so
+/// unpacking returns them bit-for-bit.
+#[derive(Debug, Clone, Copy)]
+struct PackedPatchParam(u64);
+
+impl PackedPatchParam {
+    const CELL_BITS: u32 = 12;
+
+    /// Pack `param`, or `None` when its depth exceeds
+    /// [`PatchParam::MAX_DEPTH`].
+    fn pack(param: &PatchParam) -> Option<Self> {
+        if param.depth > PatchParam::MAX_DEPTH {
+            return None;
+        }
+        let scale = (1u32 << param.depth) as f32;
+        let corner = CORNER_UV[param.rotation as usize % 4];
+        let cell = [0, 1].map(|k| (param.origin[k] * scale - corner[k]) as u64);
+        debug_assert!(cell.iter().all(|&c| c < 1 << param.depth));
+        let high = param.depth as u64
+            | (param.rotation as u64 % 4) << 4
+            | (param.triangular as u64) << 6
+            | cell[0] << 7
+            | cell[1] << (7 + Self::CELL_BITS);
+        Some(Self(param.ptex_face as u64 | high << 32))
+    }
+
+    fn unpack(self) -> PatchParam {
+        let high = self.0 >> 32;
+        let depth = (high & 0xf) as u8;
+        let rotation = ((high >> 4) & 0x3) as u8;
+        let mask = (1u64 << Self::CELL_BITS) - 1;
+        let cell = [(high >> 7) & mask, (high >> (7 + Self::CELL_BITS)) & mask];
+        let scale = (1u32 << depth) as f32;
+        let corner = CORNER_UV[rotation as usize];
+        PatchParam {
+            ptex_face: self.0 as Index,
+            depth,
+            rotation,
+            origin: [0, 1].map(|k| (cell[k] as f32 + corner[k]) / scale),
+            triangular: (high >> 6) & 1 != 0,
+        }
+    }
+}
+
 /// Basis weights of a patch at one parametric location: the limit point is
 /// `Σ weights[i] · control[indices[i]]`, and similarly for the first
 /// derivatives with respect to the ptex-face `(u, v)`.
@@ -179,15 +238,65 @@ pub struct PatchBasis {
     pub dv_weights: Vec<f32>,
 }
 
-#[derive(Debug, Clone)]
-enum PatchKind {
+/// The internal patch arrays of a [`PatchTable`], in table order: each
+/// holds patches of one kind contiguously (`Far::PatchTable`'s patch
+/// arrays). Single-crease patches are [`PatchType::Regular`] patches with
+/// their own array, so that plain regular patches carry no crease data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayKind {
+    Regular,
+    SingleCrease,
+    Gregory,
+    Quads,
+    Loop,
+    GregoryTriangle,
+    Triangles,
+}
+
+impl ArrayKind {
+    const ALL: [ArrayKind; 7] = [
+        ArrayKind::Regular,
+        ArrayKind::SingleCrease,
+        ArrayKind::Gregory,
+        ArrayKind::Quads,
+        ArrayKind::Loop,
+        ArrayKind::GregoryTriangle,
+        ArrayKind::Triangles,
+    ];
+
+    /// The number of entries each patch of this kind has in the table's
+    /// control-vertex buffer (end caps keep theirs in [`LocalPoints`]).
+    fn num_cvs(self) -> usize {
+        match self {
+            ArrayKind::Regular | ArrayKind::SingleCrease => 16,
+            ArrayKind::Loop => 12,
+            ArrayKind::Quads => 4,
+            ArrayKind::Triangles => 3,
+            ArrayKind::Gregory | ArrayKind::GregoryTriangle => 0,
+        }
+    }
+}
+
+/// One non-empty patch array: its patches are `start..` in table order, and
+/// their control vertices, single-crease data or end-cap ranges start at
+/// `first_cv` and `first_aux` in the table's buffers.
+#[derive(Debug, Clone, Copy)]
+struct PatchArray {
+    kind: ArrayKind,
+    start: usize,
+    first_cv: usize,
+    first_aux: usize,
+}
+
+/// A borrowed view of one patch's data in a [`PatchTable`].
+enum PatchRef<'a> {
     /// A 4x4 control-vertex grid (row-major, rows along `t`), with
     /// `INDEX_INVALID` marking phantom boundary slots.
-    Regular([Index; 16]),
+    Regular(&'a [Index; 16]),
     /// A complete 4x4 control-vertex grid (as for `Regular`) with a
     /// semi-sharp crease along face edge `edge`.
     SingleCrease {
-        cvs: [Index; 16],
+        cvs: &'a [Index; 16],
         edge: u8,
         sharpness: f32,
     },
@@ -195,16 +304,16 @@ enum PatchKind {
     /// [`LocalPoints`].
     Gregory(LocalPointRange),
     /// The face's 4 corner vertices.
-    Quads([Index; 4]),
+    Quads(&'a [Index; 4]),
     /// The 12 control vertices of a box-spline triangle (laid out as in
     /// [`loop_patch::gather_regular_patch`]), with `INDEX_INVALID` marking
     /// phantom slots beyond boundaries and infinitely sharp creases.
-    Loop([Index; 12]),
+    Loop(&'a [Index; 12]),
     /// The 18 Gregory triangle control points, stored in the table's
     /// [`LocalPoints`].
     GregoryTriangle(LocalPointRange),
     /// The face's 3 corner vertices.
-    Triangles([Index; 3]),
+    Triangles(&'a [Index; 3]),
 }
 
 /// Where the derived control points of one end-cap patch lie in
@@ -367,14 +476,6 @@ impl LocalPoints {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Patch {
-    param: PatchParam,
-    /// The face of the last level this patch covers.
-    face: Index,
-    kind: PatchKind,
-}
-
 /// A table of patches describing the limit surface of a refined mesh
 /// (`Far::PatchTable`).
 ///
@@ -385,9 +486,29 @@ struct Patch {
 /// [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
 /// level by level and appending each result to the base values
 /// ([`num_control_values`](Self::num_control_values) in total).
+///
+/// As in OpenSubdiv's patch arrays, patches are grouped by type: indices
+/// run through the regular patches (single-crease ones last), then the
+/// Gregory, quad, Loop, Gregory-triangle and linear-triangle patches, each
+/// group with its control vertices in one flat buffer and every patch's
+/// [`PatchParam`] packed into 8 bytes. Within a group, patches follow
+/// their faces level by level. Use [`PatchMap::find_patch`] to locate the
+/// patch covering a ptex location.
 #[derive(Debug, Clone)]
 pub struct PatchTable {
-    patches: Vec<Patch>,
+    /// The non-empty patch arrays, in [`ArrayKind`] order.
+    arrays: Vec<PatchArray>,
+    /// Per patch: its parameterization.
+    params: Vec<PackedPatchParam>,
+    /// Per patch: the face it covers.
+    faces: Vec<Index>,
+    /// The control vertices of the patches of every array that has them,
+    /// [`ArrayKind::num_cvs`] per patch.
+    cvs: Vec<Index>,
+    /// Per single-crease patch: the crease's sharpness and face edge.
+    creases: Vec<(f32, u8)>,
+    /// Per end-cap patch: where its derived points lie in `local_points`.
+    end_caps: Vec<LocalPointRange>,
     /// The derived control points of the end-cap patches.
     local_points: LocalPoints,
     /// Per level: patch index of each face (`INDEX_INVALID` where no patch
@@ -408,31 +529,71 @@ pub struct PatchTable {
 impl PatchTable {
     /// The number of patches in the table (`GetNumPatchesTotal`).
     pub fn num_patches(&self) -> usize {
-        self.patches.len()
+        self.params.len()
+    }
+
+    /// The array holding patch `patch`, and the patch's offset within it.
+    fn locate(&self, patch: usize) -> (&PatchArray, usize) {
+        assert!(
+            patch < self.num_patches(),
+            "patch {patch} out of range ({} patches)",
+            self.num_patches()
+        );
+        let array = self
+            .arrays
+            .iter()
+            .rfind(|array| array.start <= patch)
+            .expect("a non-empty table has an array starting at patch 0");
+        (array, patch - array.start)
+    }
+
+    /// The data of patch `patch`.
+    fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
+        let (array, offset) = self.locate(patch);
+        let num_cvs = array.kind.num_cvs();
+        let first = array.first_cv + offset * num_cvs;
+        let cvs = &self.cvs[first..first + num_cvs];
+        let aux = array.first_aux + offset;
+        match array.kind {
+            ArrayKind::Regular => PatchRef::Regular(cvs.try_into().unwrap()),
+            ArrayKind::SingleCrease => {
+                let (sharpness, edge) = self.creases[aux];
+                PatchRef::SingleCrease {
+                    cvs: cvs.try_into().unwrap(),
+                    edge,
+                    sharpness,
+                }
+            }
+            ArrayKind::Gregory => PatchRef::Gregory(self.end_caps[aux]),
+            ArrayKind::Quads => PatchRef::Quads(cvs.try_into().unwrap()),
+            ArrayKind::Loop => PatchRef::Loop(cvs.try_into().unwrap()),
+            ArrayKind::GregoryTriangle => PatchRef::GregoryTriangle(self.end_caps[aux]),
+            ArrayKind::Triangles => PatchRef::Triangles(cvs.try_into().unwrap()),
+        }
     }
 
     /// The basis type of patch `patch`.
     pub fn patch_type(&self, patch: usize) -> PatchType {
-        match &self.patches[patch].kind {
-            PatchKind::Regular(_) | PatchKind::SingleCrease { .. } => PatchType::Regular,
-            PatchKind::Gregory(_) => PatchType::GregoryBasis,
-            PatchKind::Quads(_) => PatchType::Quads,
-            PatchKind::Loop(_) => PatchType::Loop,
-            PatchKind::GregoryTriangle(_) => PatchType::GregoryTriangle,
-            PatchKind::Triangles(_) => PatchType::Triangles,
+        match self.locate(patch).0.kind {
+            ArrayKind::Regular | ArrayKind::SingleCrease => PatchType::Regular,
+            ArrayKind::Gregory => PatchType::GregoryBasis,
+            ArrayKind::Quads => PatchType::Quads,
+            ArrayKind::Loop => PatchType::Loop,
+            ArrayKind::GregoryTriangle => PatchType::GregoryTriangle,
+            ArrayKind::Triangles => PatchType::Triangles,
         }
     }
 
     /// The [`PatchParam`] of patch `patch` (`GetPatchParam`).
     pub fn patch_param(&self, patch: usize) -> PatchParam {
-        self.patches[patch].param
+        self.params[patch].unpack()
     }
 
     /// The face covered by patch `patch`, within the level given by the
     /// patch's [`PatchParam::depth`] ancestry (for uniform refiners, the
     /// last level).
     pub fn patch_face(&self, patch: usize) -> Index {
-        self.patches[patch].face
+        self.faces[patch]
     }
 
     /// The control vertices of patch `patch` (`GetPatchVertices`), as
@@ -440,23 +601,23 @@ impl PatchTable {
     /// slots of regular patches are omitted; for Gregory patches this is
     /// the union of the vertices supporting its derived points.
     pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
-        match &self.patches[patch].kind {
-            PatchKind::Regular(cvs) => cvs
+        match self.patch_ref(patch) {
+            PatchRef::Regular(cvs) => cvs
                 .iter()
                 .copied()
                 .filter(|&cv| cv != INDEX_INVALID)
                 .collect(),
-            PatchKind::Loop(cvs) => cvs
+            PatchRef::Loop(cvs) => cvs
                 .iter()
                 .copied()
                 .filter(|&cv| cv != INDEX_INVALID)
                 .collect(),
-            PatchKind::SingleCrease { cvs, .. } => cvs.to_vec(),
-            PatchKind::Quads(cvs) => cvs.to_vec(),
-            PatchKind::Triangles(cvs) => cvs.to_vec(),
-            PatchKind::Gregory(range) => self.local_points.support(*range, gregory::NUM_POINTS),
-            PatchKind::GregoryTriangle(range) => {
-                self.local_points.support(*range, NUM_GREGORY_TRI_POINTS)
+            PatchRef::SingleCrease { cvs, .. } => cvs.to_vec(),
+            PatchRef::Quads(cvs) => cvs.to_vec(),
+            PatchRef::Triangles(cvs) => cvs.to_vec(),
+            PatchRef::Gregory(range) => self.local_points.support(range, gregory::NUM_POINTS),
+            PatchRef::GregoryTriangle(range) => {
+                self.local_points.support(range, NUM_GREGORY_TRI_POINTS)
             }
         }
     }
@@ -468,8 +629,8 @@ impl PatchTable {
     /// [`AdaptiveOptions::use_single_crease_patch`](super::AdaptiveOptions::use_single_crease_patch)
     /// — and `0.0` for every other patch.
     pub fn single_crease_sharpness(&self, patch: usize) -> f32 {
-        match self.patches[patch].kind {
-            PatchKind::SingleCrease { sharpness, .. } => sharpness,
+        match self.patch_ref(patch) {
+            PatchRef::SingleCrease { sharpness, .. } => sharpness,
             _ => 0.0,
         }
     }
@@ -490,11 +651,11 @@ impl PatchTable {
     /// of the patch's *ptex face* (`EvaluateBasis`): returns point and
     /// first-derivative weights on the patch's control vertices.
     pub fn evaluate_basis(&self, patch: usize, u: f32, v: f32) -> PatchBasis {
-        let p = &self.patches[patch];
-        let (s, t) = p.param.normalize(u, v);
+        let param = self.patch_param(patch);
+        let (s, t) = param.normalize(u, v);
         // Chain rule to ptex frame: dP/du = Ps·ds/du + Pt·dt/du with
         // m = [ds/du, ds/dv, dt/du, dt/dv].
-        let m = p.param.derivative_matrix();
+        let m = param.derivative_matrix();
 
         let mut basis = PatchBasis::default();
         let mut push = |cv: Index, w: f32, ws: f32, wt: f32| {
@@ -515,8 +676,8 @@ impl PatchTable {
             }
         };
 
-        match &p.kind {
-            PatchKind::Regular(cvs) => {
+        match self.patch_ref(patch) {
+            PatchRef::Regular(cvs) => {
                 let (bu, dbu) = bspline_basis(s);
                 let (bv, dbv) = bspline_basis(t);
                 let mut w = [0.0f32; 16];
@@ -540,7 +701,7 @@ impl PatchTable {
                     push(cv, w[slot], ws[slot], wt[slot]);
                 }
             }
-            PatchKind::SingleCrease {
+            PatchRef::SingleCrease {
                 cvs,
                 edge,
                 sharpness,
@@ -548,13 +709,13 @@ impl PatchTable {
                 // Edges 3 and 1 are the columns at s = 0 and s = 1, edges 0
                 // and 2 the rows at t = 0 and t = 1.
                 let (bu, dbu) = match edge {
-                    3 => crease_basis_oriented(s, *sharpness, false),
-                    1 => crease_basis_oriented(s, *sharpness, true),
+                    3 => crease_basis_oriented(s, sharpness, false),
+                    1 => crease_basis_oriented(s, sharpness, true),
                     _ => bspline_basis(s),
                 };
                 let (bv, dbv) = match edge {
-                    0 => crease_basis_oriented(t, *sharpness, false),
-                    2 => crease_basis_oriented(t, *sharpness, true),
+                    0 => crease_basis_oriented(t, sharpness, false),
+                    2 => crease_basis_oriented(t, sharpness, true),
                     _ => bspline_basis(t),
                 };
                 for j in 0..4 {
@@ -568,7 +729,7 @@ impl PatchTable {
                     }
                 }
             }
-            PatchKind::Quads(cvs) => {
+            PatchRef::Quads(cvs) => {
                 let w = [(1.0 - s) * (1.0 - t), s * (1.0 - t), s * t, (1.0 - s) * t];
                 let ws = [-(1.0 - t), 1.0 - t, t, -t];
                 let wt = [-(1.0 - s), -s, s, 1.0 - s];
@@ -576,14 +737,14 @@ impl PatchTable {
                     push(cv, w[slot], ws[slot], wt[slot]);
                 }
             }
-            PatchKind::Gregory(range) => {
+            PatchRef::Gregory(range) => {
                 let (w20, ws20, wt20) = gregory::evaluate_basis(s, t);
                 self.local_points
-                    .for_each_entry(*range, gregory::NUM_POINTS, |point, cv, sw| {
+                    .for_each_entry(range, gregory::NUM_POINTS, |point, cv, sw| {
                         push(cv, w20[point] * sw, ws20[point] * sw, wt20[point] * sw);
                     });
             }
-            PatchKind::Loop(cvs) => {
+            PatchRef::Loop(cvs) => {
                 let (mut w, mut ws, mut wt) = loop_patch::box_spline_basis(s, t);
                 loop_patch::fold_phantom_weights(cvs, &mut w);
                 loop_patch::fold_phantom_weights(cvs, &mut ws);
@@ -596,17 +757,14 @@ impl PatchTable {
                     push(cv, w[slot], ws[slot], wt[slot]);
                 }
             }
-            PatchKind::GregoryTriangle(range) => {
+            PatchRef::GregoryTriangle(range) => {
                 let (w18, ws18, wt18) = loop_patch::evaluate_basis(s, t);
-                self.local_points.for_each_entry(
-                    *range,
-                    NUM_GREGORY_TRI_POINTS,
-                    |point, cv, sw| {
+                self.local_points
+                    .for_each_entry(range, NUM_GREGORY_TRI_POINTS, |point, cv, sw| {
                         push(cv, w18[point] * sw, ws18[point] * sw, wt18[point] * sw);
-                    },
-                );
+                    });
             }
-            PatchKind::Triangles(cvs) => {
+            PatchRef::Triangles(cvs) => {
                 let w = [1.0 - s - t, s, t];
                 let ws = [-1.0, 1.0, 0.0];
                 let wt = [-1.0, 0.0, 1.0];
@@ -717,7 +875,10 @@ impl PatchTableFactory {
     ///
     /// Returns [`TopologyError::PatchesRequireRefinement`] when the base
     /// mesh contains non-quad faces (under a quad-split scheme) and
-    /// `refiner` has not been refined at least once.
+    /// `refiner` has not been refined at least once, and
+    /// [`TopologyError::PatchDepthTooDeep`] when a patch would lie deeper
+    /// than [`PatchParam::MAX_DEPTH`] below its ptex face (uniform
+    /// refinement past that level).
     pub fn create(refiner: &TopologyRefiner) -> Result<PatchTable, TopologyError> {
         let scheme_type = refiner.scheme_type();
         let triangular = scheme_type.topological_split_type() == Split::ToTris;
@@ -757,17 +918,27 @@ impl PatchTableFactory {
         let ptex = PtexIndices::new(refiner);
         let single_crease = refiner.uses_single_crease_patch();
 
-        let mut patches = Vec::new();
+        // Each patch goes to the array of its kind; `face_to_patch` holds
+        // its offset there, and `face_kind` the array, until the arrays are
+        // laid out one after another.
+        let mut builders: [ArrayBuilder; 7] = Default::default();
         let mut local_points = LocalPoints::default();
         let mut face_to_patch: Vec<Vec<Index>> = (0..=max_level)
             .map(|l| vec![INDEX_INVALID; refiner.level(l).num_faces()])
+            .collect();
+        let mut face_kind: Vec<Vec<u8>> = (0..=max_level)
+            .map(|l| vec![0; refiner.level(l).num_faces()])
             .collect();
 
         for level in 0..=max_level {
             let level_view = refiner.level(level);
             let inner = level_view.inner();
             let offset = level_offsets[level];
-            for (face, patch_slot) in face_to_patch[level].iter_mut().enumerate() {
+            for (face, (patch_slot, kind_slot)) in face_to_patch[level]
+                .iter_mut()
+                .zip(face_kind[level].iter_mut())
+                .enumerate()
+            {
                 if level_view.is_face_hole(face) || !refiner.face_is_candidate(level, face) {
                     continue;
                 }
@@ -776,65 +947,134 @@ impl PatchTableFactory {
                 }
                 let param =
                     compute_patch_param(refiner, &ptex, &first_child, face, level, triangular);
+                let packed =
+                    PackedPatchParam::pack(&param).ok_or(TopologyError::PatchDepthTooDeep {
+                        depth: param.depth as usize,
+                        max: PatchParam::MAX_DEPTH as usize,
+                    })?;
+                debug_assert!(same_param(&packed.unpack(), &param));
+                // Phantom slots stay `INDEX_INVALID`; real ones move into
+                // the concatenated control values.
+                let shift = |cvs: &mut [Index]| {
+                    for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
+                        *cv += offset;
+                    }
+                };
+                let builder = |kind: ArrayKind| kind as usize;
                 let kind = match scheme_type {
                     SchemeType::Catmark => {
                         if let Some(mut cvs) = gather_regular_patch(inner, face) {
-                            for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
-                                *cv += offset;
-                            }
-                            PatchKind::Regular(cvs)
-                        } else if let Some(patch) = single_crease
+                            shift(&mut cvs);
+                            builders[builder(ArrayKind::Regular)].cvs.extend(cvs);
+                            ArrayKind::Regular
+                        } else if let Some(mut patch) = single_crease
                             .then(|| single_crease_patch(inner, face))
                             .flatten()
                         {
-                            PatchKind::SingleCrease {
-                                cvs: patch.cvs.map(|cv| cv + offset),
-                                edge: patch.edge,
-                                sharpness: patch.sharpness,
-                            }
+                            shift(&mut patch.cvs);
+                            let array = &mut builders[builder(ArrayKind::SingleCrease)];
+                            array.cvs.extend(patch.cvs);
+                            array.creases.push((patch.sharpness, patch.edge));
+                            ArrayKind::SingleCrease
                         } else if let Some(points) = gregory::build(inner, face) {
                             // Irregular neighborhood (extraordinary, boundary,
                             // crease, sharp, dart or non-manifold corners):
                             // Gregory end cap.
-                            PatchKind::Gregory(local_points.push(&points, offset))
+                            builders[builder(ArrayKind::Gregory)]
+                                .end_caps
+                                .push(local_points.push(&points, offset));
+                            ArrayKind::Gregory
                         } else {
                             // Unsharpened boundary or non-quad ring: bilinear
                             // fallback.
-                            PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
+                            let mut cvs = quad_cvs(inner, face);
+                            shift(&mut cvs);
+                            builders[builder(ArrayKind::Quads)].cvs.extend(cvs);
+                            ArrayKind::Quads
                         }
                     }
                     SchemeType::Loop => {
                         if let Some(mut cvs) = loop_patch::gather_regular_patch(inner, face) {
-                            for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
-                                *cv += offset;
-                            }
-                            PatchKind::Loop(cvs)
+                            shift(&mut cvs);
+                            builders[builder(ArrayKind::Loop)].cvs.extend(cvs);
+                            ArrayKind::Loop
                         } else if let Some(points) = loop_patch::build(inner, face) {
-                            PatchKind::GregoryTriangle(local_points.push(&points, offset))
+                            builders[builder(ArrayKind::GregoryTriangle)]
+                                .end_caps
+                                .push(local_points.push(&points, offset));
+                            ArrayKind::GregoryTriangle
                         } else {
                             // Unsharpened boundary: linear fallback.
-                            PatchKind::Triangles(tri_cvs(inner, face).map(|cv| cv + offset))
+                            let mut cvs = tri_cvs(inner, face);
+                            shift(&mut cvs);
+                            builders[builder(ArrayKind::Triangles)].cvs.extend(cvs);
+                            ArrayKind::Triangles
                         }
                     }
                     // Bilinear: the mesh is its own limit surface.
                     SchemeType::Bilinear => {
-                        PatchKind::Quads(quad_cvs(inner, face).map(|cv| cv + offset))
+                        let mut cvs = quad_cvs(inner, face);
+                        shift(&mut cvs);
+                        builders[builder(ArrayKind::Quads)].cvs.extend(cvs);
+                        ArrayKind::Quads
                     }
                 };
-                *patch_slot = patches.len() as Index;
-                patches.push(Patch {
-                    param,
-                    face: face as Index,
-                    kind,
-                });
+                let array = &mut builders[builder(kind)];
+                *patch_slot = array.params.len() as Index;
+                *kind_slot = kind as u8;
+                array.params.push(packed);
+                array.faces.push(face as Index);
             }
         }
 
-        // The tables only grow while building; drop their spare capacity.
-        patches.shrink_to_fit();
+        // Lay the arrays out one after another, in `ArrayKind` order, with
+        // exactly the capacity they need.
+        let total_of = |f: fn(&ArrayBuilder) -> usize| builders.iter().map(f).sum::<usize>();
+        let num_patches = total_of(|b| b.params.len());
+        let mut arrays = Vec::new();
+        let mut params = Vec::with_capacity(num_patches);
+        let mut faces = Vec::with_capacity(num_patches);
+        let mut cvs = Vec::with_capacity(total_of(|b| b.cvs.len()));
+        let mut creases = Vec::with_capacity(total_of(|b| b.creases.len()));
+        let mut end_caps = Vec::with_capacity(total_of(|b| b.end_caps.len()));
+        let mut starts = [0usize; 7];
+        for (kind, builder) in ArrayKind::ALL.into_iter().zip(builders) {
+            starts[kind as usize] = params.len();
+            if builder.params.is_empty() {
+                continue;
+            }
+            arrays.push(PatchArray {
+                kind,
+                start: params.len(),
+                first_cv: cvs.len(),
+                first_aux: match kind {
+                    ArrayKind::SingleCrease => creases.len(),
+                    ArrayKind::Gregory | ArrayKind::GregoryTriangle => end_caps.len(),
+                    _ => 0,
+                },
+            });
+            params.extend(builder.params);
+            faces.extend(builder.faces);
+            cvs.extend(builder.cvs);
+            creases.extend(builder.creases);
+            end_caps.extend(builder.end_caps);
+        }
+        for (patches, kinds) in face_to_patch.iter_mut().zip(&face_kind) {
+            for (patch, &kind) in patches.iter_mut().zip(kinds) {
+                if *patch != INDEX_INVALID {
+                    *patch += starts[kind as usize] as Index;
+                }
+            }
+        }
+
         local_points.shrink_to_fit();
         Ok(PatchTable {
-            patches,
+            arrays,
+            params,
+            faces,
+            cvs,
+            creases,
+            end_caps,
             local_points,
             face_to_patch,
             ptex,
@@ -844,6 +1084,26 @@ impl PatchTableFactory {
             triangular,
         })
     }
+}
+
+/// The patches of one [`ArrayKind`] while [`PatchTableFactory::create`]
+/// builds them.
+#[derive(Default)]
+struct ArrayBuilder {
+    params: Vec<PackedPatchParam>,
+    faces: Vec<Index>,
+    cvs: Vec<Index>,
+    creases: Vec<(f32, u8)>,
+    end_caps: Vec<LocalPointRange>,
+}
+
+/// Are `a` and `b` the same parameterization, bit for bit?
+fn same_param(a: &PatchParam, b: &PatchParam) -> bool {
+    a.ptex_face == b.ptex_face
+        && a.depth == b.depth
+        && a.rotation == b.rotation
+        && a.triangular == b.triangular
+        && a.origin.map(f32::to_bits) == b.origin.map(f32::to_bits)
 }
 
 // ----------------------------------------------------------------------
@@ -1451,4 +1711,95 @@ fn crease_basis_oriented(x: f32, sharpness: f32, reversed: bool) -> ([f32; 4], [
     }
     let (w, d) = crease_basis(1.0 - x, sharpness);
     ([w[3], w[2], w[1], w[0]], [-d[3], -d[2], -d[1], -d[0]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::far::{AdaptiveOptions, TopologyDescriptor, TopologyRefinerFactory};
+    use crate::sdc;
+
+    fn param(depth: u8, rotation: u8, cell: [u32; 2], triangular: bool) -> PatchParam {
+        let scale = (1u32 << depth) as f32;
+        let corner = CORNER_UV[rotation as usize];
+        PatchParam {
+            ptex_face: 0xdead_beef,
+            depth,
+            rotation,
+            origin: [0, 1].map(|k| (cell[k] as f32 + corner[k]) / scale),
+            triangular,
+        }
+    }
+
+    #[test]
+    fn packed_params_round_trip_up_to_max_depth() {
+        for depth in 0..=PatchParam::MAX_DEPTH {
+            let last = (1u32 << depth) - 1;
+            for rotation in 0..4 {
+                for cell in [
+                    [0, 0],
+                    [last, 0],
+                    [0, last],
+                    [last, last],
+                    [last / 3, last / 2],
+                ] {
+                    for triangular in [false, true] {
+                        let p = param(depth, rotation, cell, triangular);
+                        let packed = PackedPatchParam::pack(&p).unwrap();
+                        assert!(same_param(&packed.unpack(), &p), "{p:?}");
+                    }
+                }
+            }
+        }
+        let too_deep = param(PatchParam::MAX_DEPTH + 1, 0, [0, 0], false);
+        assert!(PackedPatchParam::pack(&too_deep).is_none());
+    }
+
+    /// The factory checks every packed parameter against the computed one
+    /// (a debug assertion); these tables reach every rotation, N-gon ptex
+    /// roots and inverted triangles.
+    #[test]
+    fn tables_store_every_orientation_exactly() {
+        // A pentagon ringed by quads, and a triangulated grid.
+        let mut pentagon = (vec![5], vec![0, 1, 2, 3, 4]);
+        for i in 0..5u32 {
+            let j = (i + 1) % 5;
+            pentagon.0.push(4);
+            pentagon.1.extend([j, i, i + 5, j + 5]);
+        }
+        let mut tris = (Vec::new(), Vec::new());
+        for j in 0..3u32 {
+            for i in 0..3u32 {
+                let v = j * 4 + i;
+                tris.0.extend([3, 3]);
+                tris.1.extend([v, v + 1, v + 5, v, v + 5, v + 4]);
+            }
+        }
+        let options = sdc::Options::default()
+            .with_vtx_boundary_interpolation(sdc::VtxBoundaryInterpolation::EdgeAndCorner);
+        let mut seen = Vec::new();
+        for (num_verts, mesh, scheme) in [
+            (10, &pentagon, sdc::SchemeType::Catmark),
+            (16, &tris, sdc::SchemeType::Loop),
+        ] {
+            let descriptor = TopologyDescriptor::new(num_verts, &mesh.0, &mesh.1);
+            let mut refiner = TopologyRefinerFactory::create(descriptor, scheme, options).unwrap();
+            refiner.refine_adaptive(AdaptiveOptions::new(3));
+            let table = PatchTableFactory::create(&refiner).unwrap();
+            for p in 0..table.num_patches() {
+                let param = table.patch_param(p);
+                seen.push((param.triangular, param.rotation));
+            }
+        }
+        for expected in [
+            (false, 0),
+            (false, 1),
+            (false, 2),
+            (false, 3),
+            (true, 0),
+            (true, 2),
+        ] {
+            assert!(seen.contains(&expected), "no patch at {expected:?}");
+        }
+    }
 }

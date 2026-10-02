@@ -473,6 +473,8 @@ impl LimitStencilTableFactory {
     ///
     /// Returns [`TopologyError::PatchesRequireRefinement`] when a patch
     /// table has to be built for an unrefined mesh with non-quad faces,
+    /// [`TopologyError::PatchDepthTooDeep`] when one has to be built for a
+    /// refiner deeper than [`PatchParam::MAX_DEPTH`](super::PatchParam::MAX_DEPTH),
     /// [`TopologyError::PtexFaceOutOfRange`] when a non-empty location
     /// array names a ptex face the patch table does not have, and
     /// [`TopologyError::LimitLocationInHole`] when a location lies in a

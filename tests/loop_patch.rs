@@ -212,14 +212,18 @@ fn regular_grid_patches_have_linear_precision() {
     let map = PatchMap::new(&table);
     let level = refiner.level(0);
     for ptex in 0..num_faces {
-        if table.patch_type(ptex) != PatchType::Loop {
+        // Each unrefined base triangle is one patch at depth 0.
+        let face_patch = map.find_patch(ptex, 0.25, 0.25).unwrap();
+        assert_eq!(table.patch_face(face_patch) as usize, ptex);
+        assert_eq!(table.patch_param(face_patch).depth, 0);
+        if table.patch_type(face_patch) != PatchType::Loop {
             continue;
         }
         let fv = level.face_vertices(ptex);
         let corner = |k: usize| positions[fv[k] as usize];
         for &(u, v) in &tri_samples(10) {
             let patch = map.find_patch(ptex, u, v).unwrap();
-            assert_eq!(patch, ptex);
+            assert_eq!(patch, face_patch);
             let (point, du, dv) = table.evaluate(patch, u, v, &positions);
             let mut expected = [0.0f32; 3];
             let mut edu = [0.0f32; 3];
