@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Chaikin creasing no longer averages infinitely sharp edges into the child
+  sharpness of a semi-sharp edge
+  ([#32](https://github.com/doubleailes/OpenSubdiv-rs/issues/32)). As in
+  OpenSubdiv's `Sdc::Crease::SubdivideEdgeSharpnessAtVertex`, only the other
+  *semi-sharp* edges at the shared vertex take part in the average, and an
+  edge without semi-sharp neighbours is decremented uniformly. Boundary
+  edges, infinite creases and non-manifold edges used to inflate the child
+  sharpness of every Chaikin crease that touched them (a 2.0 edge ending on
+  the boundary got 3.0 instead of 1.0), which changed refined and limit
+  positions, stencil tables and patch tables around those creases.
+
 ## [0.5.0] - 2026-10-02
 
 ### Added
