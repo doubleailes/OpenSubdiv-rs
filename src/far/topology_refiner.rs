@@ -43,6 +43,22 @@ pub struct AdaptiveOptions {
     /// `4^level` patches down to where the crease decays (or to the
     /// isolation cap). Off by default, as in OpenSubdiv.
     pub use_single_crease_patch: bool,
+    /// Also isolate the irregular features of face-varying channels
+    /// (`considerFVarChannels`): a face is refined further when the value
+    /// mesh of a channel that is not linear
+    /// ([`FVarLinearInterpolation::All`](crate::sdc::FVarLinearInterpolation::All))
+    /// is irregular around it — at seam junctions, fvar darts and
+    /// irregular seam corners, say — even where the vertex topology is
+    /// regular.
+    ///
+    /// Without it, such a face is patched where its vertex topology becomes
+    /// regular, and its face-varying patch
+    /// ([`super::PatchTable::evaluate_basis_face_varying`]) is a Gregory
+    /// end cap at that level: an approximation of the channel's limit
+    /// there. With it, the face-varying patches approximate the limit as
+    /// closely as the vertex patches do, at the cost of more patches. Off
+    /// by default, as in OpenSubdiv.
+    pub consider_fvar_channels: bool,
 }
 
 impl AdaptiveOptions {
@@ -60,6 +76,7 @@ impl AdaptiveOptions {
         Self {
             isolation_level,
             use_single_crease_patch: false,
+            consider_fvar_channels: false,
         }
     }
 
@@ -67,6 +84,13 @@ impl AdaptiveOptions {
     /// ([`use_single_crease_patch`](Self::use_single_crease_patch)).
     pub fn with_single_crease_patch(mut self, enabled: bool) -> Self {
         self.use_single_crease_patch = enabled;
+        self
+    }
+
+    /// Enable or disable the isolation of face-varying features
+    /// ([`consider_fvar_channels`](Self::consider_fvar_channels)).
+    pub fn with_consider_fvar_channels(mut self, enabled: bool) -> Self {
+        self.consider_fvar_channels = enabled;
         self
     }
 }
@@ -329,6 +353,10 @@ impl TopologyRefiner {
     /// semi-sharp creases, irregular boundaries and darts — descend to the
     /// isolation cap. For Bilinear only non-quad base faces need one round
     /// of isolation.
+    ///
+    /// With [`AdaptiveOptions::consider_fvar_channels`], faces around the
+    /// irregular features of non-linear face-varying channels are isolated
+    /// the same way.
     pub fn refine_adaptive(&mut self, options: AdaptiveOptions) {
         assert!(
             self.max_level() == 0,
@@ -350,7 +378,7 @@ impl TopologyRefiner {
                 if level.is_face_hole(f) || !self.face_is_candidate(level_index, f) {
                     continue;
                 }
-                let needs_isolation = match self.scheme_type() {
+                let needs_isolation = |level: &Level| match self.scheme_type() {
                     SchemeType::Catmark => {
                         super::patch_table::gather_regular_patch(level, f).is_none()
                             && !(options.use_single_crease_patch
@@ -359,7 +387,16 @@ impl TopologyRefiner {
                     SchemeType::Bilinear => level.face_vertices(f).len() != 4,
                     SchemeType::Loop => super::loop_patch::gather_regular_patch(level, f).is_none(),
                 };
-                if needs_isolation {
+                // A channel's value mesh mirrors the geometry's faces, so
+                // face `f` is the same face in each.
+                let fvar_needs_isolation = || {
+                    options.consider_fvar_channels
+                        && self.scheme_type() != SchemeType::Bilinear
+                        && self.fvar_channels.iter().any(|channel| {
+                            !channel.is_linear() && needs_isolation(channel.level(level_index))
+                        })
+                };
+                if needs_isolation(level) || fvar_needs_isolation() {
                     *sel = true;
                     any = true;
                 }

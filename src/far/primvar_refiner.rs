@@ -160,6 +160,29 @@ impl<'a> PrimvarRefiner<'a> {
         levels
     }
 
+    /// Interpolate face-varying `channel` through the whole hierarchy in one
+    /// call: `base` holds one value per base-level value of the channel, and
+    /// one buffer per refined level is returned — the face-varying
+    /// counterpart of [`interpolate_all`](Self::interpolate_all). Appended
+    /// to `base`, they form the values
+    /// [`PatchTable::evaluate_face_varying`](super::PatchTable::evaluate_face_varying)
+    /// expects.
+    pub fn interpolate_face_varying_all<T: Primvar + Default>(
+        &self,
+        channel: usize,
+        base: &[T],
+    ) -> Vec<Vec<T>> {
+        let mut levels = Vec::with_capacity(self.refiner.max_level());
+        let mut src = base.to_vec();
+        for level in 1..=self.refiner.max_level() {
+            let mut dst = vec![T::default(); self.refiner.level(level).num_fvar_values(channel)];
+            self.interpolate_face_varying(level, channel, &src, &mut dst);
+            src.clone_from(&dst);
+            levels.push(dst);
+        }
+        levels
+    }
+
     /// Apply *limit* weights to a primvar buffer (`PrimvarRefiner::Limit`):
     /// `src` holds one value per vertex of the refiner's last level, and
     /// `dst` receives the limit-surface position of each of those vertices.

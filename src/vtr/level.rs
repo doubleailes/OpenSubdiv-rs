@@ -84,6 +84,14 @@ pub enum TopologyError {
         /// The deepest depth a patch table stores.
         max: usize,
     },
+    /// Face-varying patches were requested for a channel the refiner does
+    /// not have.
+    FVarChannelOutOfRange {
+        /// The offending channel index.
+        channel: usize,
+        /// The number of face-varying channels of the refiner.
+        num_channels: usize,
+    },
     /// A limit stencil was requested on a ptex face the patch table does
     /// not have.
     PtexFaceOutOfRange {
@@ -163,6 +171,15 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "a patch at depth {depth} is deeper than patch tables support ({max})"
+                )
+            }
+            TopologyError::FVarChannelOutOfRange {
+                channel,
+                num_channels,
+            } => {
+                write!(
+                    f,
+                    "face-varying channel {channel} is out of range (the refiner has {num_channels})"
                 )
             }
             TopologyError::PtexFaceOutOfRange {

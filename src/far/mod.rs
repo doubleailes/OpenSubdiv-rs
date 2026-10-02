@@ -24,7 +24,8 @@
 //! * [`PatchTable`] / [`PatchTableFactory`] / [`PatchMap`] — parametric
 //!   patches covering the limit surface (B-spline and Gregory patches for
 //!   Catmark, box-spline and Gregory triangle patches for Loop), located
-//!   by ptex face and `(u, v)`.
+//!   by ptex face and `(u, v)`, with optional face-varying patches per
+//!   channel ([`PatchTableOptions`]).
 
 mod fvar;
 mod gregory;
@@ -38,7 +39,9 @@ mod topology_refiner;
 
 pub use crate::vtr::TopologyError as Error;
 pub use fvar::FVarChannel;
-pub use patch_table::{PatchBasis, PatchMap, PatchParam, PatchTable, PatchTableFactory, PatchType};
+pub use patch_table::{
+    PatchBasis, PatchMap, PatchParam, PatchTable, PatchTableFactory, PatchTableOptions, PatchType,
+};
 pub use primvar_refiner::{Primvar, PrimvarRefiner};
 pub use ptex::PtexIndices;
 pub use stencil_table::{
