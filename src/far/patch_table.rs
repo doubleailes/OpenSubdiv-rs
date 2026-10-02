@@ -63,6 +63,12 @@
 //! only rotations 0 (upright) and 2 (inverted, for the central child of a
 //! subdivided triangle).
 //!
+//! [`PatchTableFactory::create_with_options_selected`] (OpenSubdiv's
+//! `selectedFaces`) builds the patches of chosen base faces only — with
+//! [`TopologyRefiner::refine_adaptive_selected`](super::TopologyRefiner::refine_adaptive_selected),
+//! refinement and patches then cost what those faces need, not what the
+//! cage does, and the patches are the ones a full table gives them.
+//!
 //! Control-vertex indices refer to the **concatenation of every level's
 //! vertices**, base level first: evaluate patches against the base values
 //! followed by each level's
@@ -1085,7 +1091,8 @@ impl<'a> PatchMap<'a> {
     /// (`FindPatch`): descends the quadrant (or, for triangles, the
     /// sub-triangle) hierarchy until a patch is found, supporting
     /// mixed-depth (adaptive) tables. `None` only when the location lies in
-    /// a hole.
+    /// a hole, or on a face a selected-face table
+    /// ([`PatchTableFactory::create_with_options_selected`]) leaves out.
     pub fn find_patch(&self, ptex_face: usize, u: f32, v: f32) -> Option<usize> {
         let table = self.table;
         let base_face = table.ptex.base_face(ptex_face) as usize;
@@ -1096,10 +1103,16 @@ impl<'a> PatchMap<'a> {
             (base_face, 0usize, u, v)
         } else {
             // Non-quad base faces root their ptex faces at level 1 (their
-            // isolation guarantees at least one refinement).
-            let child =
-                table.first_child[0][base_face] as usize + table.ptex.base_face_corner(ptex_face);
-            (child, 1usize, u, v)
+            // isolation guarantees at least one refinement, unless the
+            // table left them out with the rest of the unselected faces).
+            let first_child = table.first_child.first().map(|fc| fc[base_face]);
+            match first_child {
+                Some(first_child) if first_child != INDEX_INVALID => {
+                    let child = first_child as usize + table.ptex.base_face_corner(ptex_face);
+                    (child, 1usize, u, v)
+                }
+                _ => return None,
+            }
         };
 
         loop {
@@ -1202,7 +1215,9 @@ impl PatchTableFactory {
     ///
     /// Returns [`TopologyError::PatchesRequireRefinement`] when the base
     /// mesh contains non-quad faces (under a quad-split scheme) and
-    /// `refiner` has not been refined at least once, and
+    /// `refiner` has not refined them — not refined at all, or refined with
+    /// [`TopologyRefiner::refine_adaptive_selected`] around other faces —
+    /// and
     /// [`TopologyError::PatchDepthTooDeep`] when a patch would lie deeper
     /// than [`PatchParam::MAX_DEPTH`] below its ptex face (uniform
     /// refinement past that level).
@@ -1271,6 +1286,91 @@ impl PatchTableFactory {
         refiner: &TopologyRefiner,
         options: &PatchTableOptions,
     ) -> Result<PatchTable, TopologyError> {
+        Self::create_impl(refiner, options, None)
+    }
+
+    /// Build a [`PatchTable`] covering the limit surface of the base faces
+    /// `selected_faces` of `refiner` only, and their face-varying patches
+    /// if `options` asks for them (`PatchTableFactory::Create` with
+    /// `selectedFaces`).
+    ///
+    /// Only the selected faces and their descendants get patches: those a
+    /// full table would give them, at the same levels and with the same
+    /// types, [`PatchParam`]s, sharpness and control vertices. They are
+    /// numbered compactly (grouped by type, as in a full table), and
+    /// [`PatchMap::find_patch`] returns `None` on every ptex face of an
+    /// unselected face. Pair it with
+    /// [`TopologyRefiner::refine_adaptive_selected`] on the same faces, so
+    /// that refinement, too, costs only what the selected faces need; the
+    /// patches then evaluate the same limit surface as a full refinement's
+    /// and a full table's on those faces. Control values remain the
+    /// concatenation of every level's vertices, as for a full table.
+    ///
+    /// Unlike OpenSubdiv, where an empty `selectedFaces` array means every
+    /// face, an empty `selected_faces` yields a table without patches.
+    /// Duplicates and holes are ignored.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_with_options`](Self::create_with_options) — with
+    /// [`TopologyError::PatchesRequireRefinement`] returned when a selected
+    /// non-quad face was not refined — and
+    /// [`TopologyError::SelectedFaceOutOfRange`] when a selected face is
+    /// not a face of the base level.
+    ///
+    /// # Example
+    ///
+    /// Patch two faces of a cube, refining only around them:
+    ///
+    /// ```
+    /// use opensubdiv_rs::far::{
+    ///     AdaptiveOptions, PatchMap, PatchTableFactory, PatchTableOptions, TopologyDescriptor,
+    ///     TopologyRefinerFactory,
+    /// };
+    /// use opensubdiv_rs::sdc;
+    ///
+    /// let face_verts = [0u32, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4];
+    /// let descriptor = TopologyDescriptor::new(8, &[4; 6], &face_verts);
+    /// let mut refiner = TopologyRefinerFactory::create(
+    ///     descriptor,
+    ///     sdc::SchemeType::Catmark,
+    ///     sdc::Options::default(),
+    /// )?;
+    /// let selected = [0, 1];
+    /// refiner.refine_adaptive_selected(AdaptiveOptions::new(3), &selected);
+    /// let table = PatchTableFactory::create_with_options_selected(
+    ///     &refiner,
+    ///     &PatchTableOptions::new(),
+    ///     &selected,
+    /// )?;
+    ///
+    /// let map = PatchMap::new(&table);
+    /// assert!(map.find_patch(1, 0.3, 0.6).is_some());
+    /// assert!(map.find_patch(2, 0.3, 0.6).is_none()); // not selected
+    /// # Ok::<(), opensubdiv_rs::vtr::TopologyError>(())
+    /// ```
+    pub fn create_with_options_selected(
+        refiner: &TopologyRefiner,
+        options: &PatchTableOptions,
+        selected_faces: &[Index],
+    ) -> Result<PatchTable, TopologyError> {
+        let num_faces = refiner.level(0).num_faces();
+        let mut selected = vec![false; num_faces];
+        for &face in selected_faces {
+            *selected
+                .get_mut(face as usize)
+                .ok_or(TopologyError::SelectedFaceOutOfRange { face, num_faces })? = true;
+        }
+        Self::create_impl(refiner, options, Some(selected))
+    }
+
+    /// Build the patches of every face, or of the base faces flagged in
+    /// `selected` and their descendants.
+    fn create_impl(
+        refiner: &TopologyRefiner,
+        options: &PatchTableOptions,
+        selected: Option<Vec<bool>>,
+    ) -> Result<PatchTable, TopologyError> {
         let num_channels = refiner.num_fvar_channels();
         let fvar_channels: Vec<usize> = match (&options.fvar_channels, options.generate_fvar_tables)
         {
@@ -1289,13 +1389,7 @@ impl PatchTableFactory {
 
         let scheme_type = refiner.scheme_type();
         let triangular = scheme_type.topological_split_type() == Split::ToTris;
-        let base = refiner.level(0);
         let regular_size = scheme_type.regular_face_size();
-        let all_regular =
-            (0..base.num_faces()).all(|f| base.face_vertices(f).len() == regular_size);
-        if !all_regular && refiner.max_level() == 0 {
-            return Err(TopologyError::PatchesRequireRefinement);
-        }
 
         let max_level = refiner.max_level();
 
@@ -1340,20 +1434,39 @@ impl PatchTableFactory {
             .map(|l| vec![0; refiner.level(l).num_faces()])
             .collect();
 
+        // With selected faces: per face of the current level, does it
+        // descend from a selected base face?
+        let mut covered = selected;
         for level in 0..=max_level {
             let level_view = refiner.level(level);
             let inner = level_view.inner();
             let offset = level_offsets[level];
+            if level > 0 {
+                covered = covered.map(|parent_covered| {
+                    let refinement = refiner.refinement(level);
+                    (0..level_view.num_faces())
+                        .map(|f| parent_covered[refinement.child_face_parent_face(f) as usize])
+                        .collect()
+                });
+            }
             for (face, (patch_slot, kind_slot)) in face_to_patch[level]
                 .iter_mut()
                 .zip(face_kind[level].iter_mut())
                 .enumerate()
             {
+                if covered.as_ref().is_some_and(|covered| !covered[face]) {
+                    continue;
+                }
                 if level_view.is_face_hole(face) || !refiner.face_is_candidate(level, face) {
                     continue;
                 }
                 if level < max_level && refiner.face_is_selected(level, face) {
                     continue; // refined further; patches come from children
+                }
+                if level == 0 && level_view.face_vertices(face).len() != regular_size {
+                    // A non-quad (under a quad split) base face is patched
+                    // over its children, one ptex face per corner.
+                    return Err(TopologyError::PatchesRequireRefinement);
                 }
                 let param =
                     compute_patch_param(refiner, &ptex, &first_child, face, level, triangular);

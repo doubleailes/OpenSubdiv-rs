@@ -73,7 +73,9 @@ pub enum TopologyError {
         index: Index,
     },
     /// Building patches for a mesh with non-quad faces requires at least one
-    /// level of refinement.
+    /// level of refinement, and every non-quad face to be patched must have
+    /// been refined: one left out of
+    /// `TopologyRefiner::refine_adaptive_selected` has no patch.
     PatchesRequireRefinement,
     /// A patch would lie deeper below its ptex face than a patch table
     /// stores (`PatchParam::MAX_DEPTH`): uniform refinement past that
@@ -100,8 +102,18 @@ pub enum TopologyError {
         /// The number of ptex faces of the patch table.
         num_faces: usize,
     },
-    /// A limit stencil was requested at a location lying in a hole, where
-    /// no patch covers the limit surface.
+    /// A selected face passed to
+    /// `PatchTableFactory::create_with_options_selected` is not a face of
+    /// the base level.
+    SelectedFaceOutOfRange {
+        /// The offending face index.
+        face: Index,
+        /// The number of faces of the base level.
+        num_faces: usize,
+    },
+    /// A limit stencil was requested at a location lying in a hole, or on
+    /// a face a selected-face patch table leaves out, where no patch
+    /// covers the limit surface.
     LimitLocationInHole {
         /// The ptex face of the offending location.
         ptex_face: Index,
@@ -189,6 +201,12 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "ptex face {ptex_face} is out of range (the patch table has {num_faces} ptex faces)"
+                )
+            }
+            TopologyError::SelectedFaceOutOfRange { face, num_faces } => {
+                write!(
+                    f,
+                    "selected face {face} is out of range (the base level has {num_faces} faces)"
                 )
             }
             TopologyError::LimitLocationInHole {

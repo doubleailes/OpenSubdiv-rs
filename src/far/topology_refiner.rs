@@ -357,7 +357,53 @@ impl TopologyRefiner {
     /// With [`AdaptiveOptions::consider_fvar_channels`], faces around the
     /// irregular features of non-linear face-varying channels are isolated
     /// the same way.
+    ///
+    /// To isolate features around a few base faces only, use
+    /// [`refine_adaptive_selected`](Self::refine_adaptive_selected).
     pub fn refine_adaptive(&mut self, options: AdaptiveOptions) {
+        self.refine_adaptive_impl(options, None);
+    }
+
+    /// Feature-adaptively refine the topology around the base faces
+    /// `selected_faces` only (`RefineAdaptive` with `selectedFaces`).
+    ///
+    /// As [`refine_adaptive`](Self::refine_adaptive), except that at the
+    /// base level only the faces in `selected_faces` are inspected and
+    /// isolated: the rest of the cage is left unrefined, apart from the
+    /// one-ring support the selected faces' children need. Below the base
+    /// level isolation proceeds as usual among the descendants of the
+    /// selected faces, so each selected face is refined exactly as
+    /// [`refine_adaptive`](Self::refine_adaptive) refines it, and the
+    /// cost grows with the selected area instead of the cage size.
+    ///
+    /// Build the patches of the selected faces with
+    /// [`PatchTableFactory::create_with_options_selected`](super::PatchTableFactory::create_with_options_selected):
+    /// they are the patches a full refinement and a full table give those
+    /// faces, and they evaluate the same limit surface. A full table built
+    /// from this refiner caps the irregular faces that were not selected at
+    /// the base level (and cannot cover unselected non-quad faces, which
+    /// need a refinement to be patched).
+    ///
+    /// Unlike OpenSubdiv, where an empty `selectedFaces` array means every
+    /// face, an empty `selected_faces` selects nothing and leaves the
+    /// refiner unrefined. Duplicates and holes are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a selected face is not a face of the base level, or, as
+    /// [`refine_adaptive`](Self::refine_adaptive), when the refiner has
+    /// already been refined.
+    pub fn refine_adaptive_selected(&mut self, options: AdaptiveOptions, selected_faces: &[Index]) {
+        let num_faces = self.levels[0].num_faces();
+        if let Some(&face) = selected_faces.iter().find(|&&f| f as usize >= num_faces) {
+            panic!("selected face {face} out of range ({num_faces} base faces)");
+        }
+        self.refine_adaptive_impl(options, Some(selected_faces));
+    }
+
+    /// Adaptive refinement, inspecting only `base_faces` (when given) at
+    /// the base level.
+    fn refine_adaptive_impl(&mut self, options: AdaptiveOptions, base_faces: Option<&[Index]>) {
         assert!(
             self.max_level() == 0,
             "adaptive refinement must start from an unrefined refiner"
@@ -374,32 +420,15 @@ impl TopologyRefiner {
 
             let mut selected = vec![false; level.num_faces()];
             let mut any = false;
-            for (f, sel) in selected.iter_mut().enumerate() {
-                if level.is_face_hole(f) || !self.face_is_candidate(level_index, f) {
-                    continue;
-                }
-                let needs_isolation = |level: &Level| match self.scheme_type() {
-                    SchemeType::Catmark => {
-                        super::patch_table::gather_regular_patch(level, f).is_none()
-                            && !(options.use_single_crease_patch
-                                && super::patch_table::single_crease_patch(level, f).is_some())
-                    }
-                    SchemeType::Bilinear => level.face_vertices(f).len() != 4,
-                    SchemeType::Loop => super::loop_patch::gather_regular_patch(level, f).is_none(),
-                };
-                // A channel's value mesh mirrors the geometry's faces, so
-                // face `f` is the same face in each.
-                let fvar_needs_isolation = || {
-                    options.consider_fvar_channels
-                        && self.scheme_type() != SchemeType::Bilinear
-                        && self.fvar_channels.iter().any(|channel| {
-                            !channel.is_linear() && needs_isolation(channel.level(level_index))
-                        })
-                };
-                if needs_isolation(level) || fvar_needs_isolation() {
-                    *sel = true;
+            let mut inspect = |f: usize| {
+                if !selected[f] && self.face_needs_isolation(&options, level_index, f) {
+                    selected[f] = true;
                     any = true;
                 }
+            };
+            match (level_index, base_faces) {
+                (0, Some(faces)) => faces.iter().for_each(|&f| inspect(f as usize)),
+                _ => (0..level.num_faces()).for_each(inspect),
             }
             if !any {
                 break;
@@ -421,6 +450,41 @@ impl TopologyRefiner {
             }
             self.selections.push(selected);
         }
+    }
+
+    /// Does face `f` of the last level `level_index` need to be refined
+    /// further: is it a non-hole candidate whose neighborhood — or, with
+    /// [`AdaptiveOptions::consider_fvar_channels`], a non-linear channel's —
+    /// is not a regular patch?
+    fn face_needs_isolation(
+        &self,
+        options: &AdaptiveOptions,
+        level_index: usize,
+        f: usize,
+    ) -> bool {
+        let level = &self.levels[level_index];
+        if level.is_face_hole(f) || !self.face_is_candidate(level_index, f) {
+            return false;
+        }
+        let needs_isolation = |level: &Level| match self.scheme_type() {
+            SchemeType::Catmark => {
+                super::patch_table::gather_regular_patch(level, f).is_none()
+                    && !(options.use_single_crease_patch
+                        && super::patch_table::single_crease_patch(level, f).is_some())
+            }
+            SchemeType::Bilinear => level.face_vertices(f).len() != 4,
+            SchemeType::Loop => super::loop_patch::gather_regular_patch(level, f).is_none(),
+        };
+        // A channel's value mesh mirrors the geometry's faces, so face `f`
+        // is the same face in each.
+        let fvar_needs_isolation = || {
+            options.consider_fvar_channels
+                && self.scheme_type() != SchemeType::Bilinear
+                && self.fvar_channels.iter().any(|channel| {
+                    !channel.is_linear() && needs_isolation(channel.level(level_index))
+                })
+        };
+        needs_isolation(level) || fvar_needs_isolation()
     }
 
     /// Was this refiner refined adaptively (`IsAdaptive`)?
