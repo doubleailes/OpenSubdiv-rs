@@ -68,13 +68,26 @@
 //! followed by each level's
 //! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
 //! output.
+//!
+//! ## Face-varying patches
+//!
+//! With [`PatchTableOptions::generate_fvar_tables`], the table also holds,
+//! for each face-varying channel, one patch per vertex patch, over the same
+//! domain (OpenSubdiv's `generateFVarTables`). A channel's values form a
+//! mesh of their own, refined in lockstep with the geometry, in which seams
+//! are boundaries and the channel's linear-interpolation rule is encoded as
+//! sharpness (see [`super::fvar`]); its patch for a face is the one that
+//! value mesh gets at the vertex patch's level, by the rules above — or a
+//! linear patch, for [`FVarLinearInterpolation::All`] and under
+//! [`PatchTableOptions::generate_fvar_legacy_linear_patches`]. Its control
+//! values are the channel's values at every level, base level first.
 
 use super::gregory::{self, corner_span, is_edge_singular, vertex_rule, SparsePoint};
 use super::loop_patch::{self, NUM_GREGORY_TRI_POINTS};
 use super::primvar_refiner::Primvar;
 use super::ptex::PtexIndices;
 use super::topology_refiner::TopologyRefiner;
-use crate::sdc::{Crease, Rule, SchemeType, Split};
+use crate::sdc::{Crease, FVarLinearInterpolation, Rule, SchemeType, Split};
 use crate::vtr::{Level, TopologyError};
 use crate::{Index, INDEX_INVALID};
 
@@ -275,6 +288,18 @@ impl ArrayKind {
             ArrayKind::Gregory | ArrayKind::GregoryTriangle => 0,
         }
     }
+
+    /// The basis type of the patches of this kind.
+    fn patch_type(self) -> PatchType {
+        match self {
+            ArrayKind::Regular | ArrayKind::SingleCrease => PatchType::Regular,
+            ArrayKind::Gregory => PatchType::GregoryBasis,
+            ArrayKind::Quads => PatchType::Quads,
+            ArrayKind::Loop => PatchType::Loop,
+            ArrayKind::GregoryTriangle => PatchType::GregoryTriangle,
+            ArrayKind::Triangles => PatchType::Triangles,
+        }
+    }
 }
 
 /// One non-empty patch array: its patches are `start..` in table order, and
@@ -360,12 +385,17 @@ struct LocalPoints {
 }
 
 impl LocalPoints {
-    /// Append the stencils of one patch's `points`, shifting their vertex
-    /// indices by `offset` into the concatenated control values and
+    /// Append the stencils of one patch's `points`, moving their vertex
+    /// indices into the concatenated control values with `map` and
     /// dropping zero weights. Exact zeros are common (a regular corner
     /// scales its neighbor's points by `cos(pi / 2) = 0` in the face-point
     /// blend) and contribute nothing.
-    fn push(&mut self, points: &[SparsePoint], offset: Index) -> LocalPointRange {
+    ///
+    /// Entries of one point whose vertices `map` sends to the same control
+    /// value are merged. That only happens for face-varying patches at the
+    /// base level, where a value index the caller reused at several
+    /// vertices is one value-mesh vertex at each of them.
+    fn push(&mut self, points: &[SparsePoint], map: impl Fn(Index) -> Index) -> LocalPointRange {
         let support = self.support.len();
         let first_point = self.sizes.len();
         let first_entry = self.slots.len();
@@ -373,7 +403,7 @@ impl LocalPoints {
             for point in points {
                 let start = self.slots.len();
                 for &(cv, w) in point.0.iter().filter(|&&(_, w)| w != 0.0) {
-                    let cv = cv + offset;
+                    let cv = map(cv);
                     let slot = match self.support[support..].iter().position(|&s| s == cv) {
                         Some(slot) => slot,
                         None if self.support.len() - support < MAX_COMPACT_SUPPORT => {
@@ -382,11 +412,16 @@ impl LocalPoints {
                         }
                         None => break 'compact,
                     };
-                    self.slots.push(slot as u8);
-                    self.weights.push(w);
+                    match self.slots[start..].iter().position(|&s| s as usize == slot) {
+                        Some(entry) => self.weights[start + entry] += w,
+                        None => {
+                            self.slots.push(slot as u8);
+                            self.weights.push(w);
+                        }
+                    }
                 }
-                // A point's entries have distinct vertices (`SparsePoint`
-                // merges them), so their count is at most the support's.
+                // A point's entries have distinct slots, so their count is
+                // at most the support's.
                 self.sizes.push((self.slots.len() - start) as u8);
             }
             return LocalPointRange::Compact {
@@ -401,8 +436,11 @@ impl LocalPoints {
         self.slots.truncate(first_entry);
         self.weights.truncate(first_entry);
         let nonzero = |point: &SparsePoint| {
-            let entries = point.0.iter().filter(|&&(_, w)| w != 0.0);
-            SparsePoint(entries.map(|&(cv, w)| (cv + offset, w)).collect())
+            let mut mapped = SparsePoint::default();
+            for &(cv, w) in point.0.iter().filter(|&&(_, w)| w != 0.0) {
+                mapped.add(map(cv), w);
+            }
+            mapped
         };
         self.wide.push(points.iter().map(nonzero).collect());
         LocalPointRange::Wide(self.wide.len() - 1)
@@ -476,32 +514,13 @@ impl LocalPoints {
     }
 }
 
-/// A table of patches describing the limit surface of a refined mesh
-/// (`Far::PatchTable`).
-///
-/// Patches may live at *mixed depths* (feature-adaptive refinement emits a
-/// patch at the level where its face becomes regular). Control-vertex
-/// indices refer to the **concatenation of every level's vertices**, base
-/// level first — the buffer produced by evaluating
-/// [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
-/// level by level and appending each result to the base values
-/// ([`num_control_values`](Self::num_control_values) in total).
-///
-/// As in OpenSubdiv's patch arrays, patches are grouped by type: indices
-/// run through the regular patches (single-crease ones last), then the
-/// Gregory, quad, Loop, Gregory-triangle and linear-triangle patches, each
-/// group with its control vertices in one flat buffer and every patch's
-/// [`PatchParam`] packed into 8 bytes. Within a group, patches follow
-/// their faces level by level. Use [`PatchMap::find_patch`] to locate the
-/// patch covering a ptex location.
-#[derive(Debug, Clone)]
-pub struct PatchTable {
+/// The patches of a [`PatchTable`], or of one of its face-varying channels,
+/// grouped into arrays by kind (`Far::PatchTable`'s patch arrays), with the
+/// buffers the arrays index into.
+#[derive(Debug, Clone, Default)]
+struct PatchArrays {
     /// The non-empty patch arrays, in [`ArrayKind`] order.
     arrays: Vec<PatchArray>,
-    /// Per patch: its parameterization.
-    params: Vec<PackedPatchParam>,
-    /// Per patch: the face it covers.
-    faces: Vec<Index>,
     /// The control vertices of the patches of every array that has them,
     /// [`ArrayKind::num_cvs`] per patch.
     cvs: Vec<Index>,
@@ -511,45 +530,11 @@ pub struct PatchTable {
     end_caps: Vec<LocalPointRange>,
     /// The derived control points of the end-cap patches.
     local_points: LocalPoints,
-    /// Per level: patch index of each face (`INDEX_INVALID` where no patch
-    /// was emitted — holes, refined faces, or unsupported support faces).
-    face_to_patch: Vec<Vec<Index>>,
-    ptex: PtexIndices,
-    max_level: usize,
-    /// Per refinement step: first child face of each parent face
-    /// (`INDEX_INVALID` for faces without children under sparse
-    /// refinement).
-    first_child: Vec<Vec<Index>>,
-    /// Total control values (sum of all levels' vertex counts).
-    num_control_values: usize,
-    /// Are the patches triangular (the Loop scheme)?
-    triangular: bool,
 }
 
-impl PatchTable {
-    /// The number of patches in the table (`GetNumPatchesTotal`).
-    pub fn num_patches(&self) -> usize {
-        self.params.len()
-    }
-
-    /// The array holding patch `patch`, and the patch's offset within it.
-    fn locate(&self, patch: usize) -> (&PatchArray, usize) {
-        assert!(
-            patch < self.num_patches(),
-            "patch {patch} out of range ({} patches)",
-            self.num_patches()
-        );
-        let array = self
-            .arrays
-            .iter()
-            .rfind(|array| array.start <= patch)
-            .expect("a non-empty table has an array starting at patch 0");
-        (array, patch - array.start)
-    }
-
-    /// The data of patch `patch`.
-    fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
-        let (array, offset) = self.locate(patch);
+impl PatchArrays {
+    /// The data of the patch at `offset` in `array`.
+    fn patch_ref(&self, array: &PatchArray, offset: usize) -> PatchRef<'_> {
         let num_cvs = array.kind.num_cvs();
         let first = array.first_cv + offset * num_cvs;
         let cvs = &self.cvs[first..first + num_cvs];
@@ -572,36 +557,10 @@ impl PatchTable {
         }
     }
 
-    /// The basis type of patch `patch`.
-    pub fn patch_type(&self, patch: usize) -> PatchType {
-        match self.locate(patch).0.kind {
-            ArrayKind::Regular | ArrayKind::SingleCrease => PatchType::Regular,
-            ArrayKind::Gregory => PatchType::GregoryBasis,
-            ArrayKind::Quads => PatchType::Quads,
-            ArrayKind::Loop => PatchType::Loop,
-            ArrayKind::GregoryTriangle => PatchType::GregoryTriangle,
-            ArrayKind::Triangles => PatchType::Triangles,
-        }
-    }
-
-    /// The [`PatchParam`] of patch `patch` (`GetPatchParam`).
-    pub fn patch_param(&self, patch: usize) -> PatchParam {
-        self.params[patch].unpack()
-    }
-
-    /// The face covered by patch `patch`, within the level given by the
-    /// patch's [`PatchParam::depth`] ancestry (for uniform refiners, the
-    /// last level).
-    pub fn patch_face(&self, patch: usize) -> Index {
-        self.faces[patch]
-    }
-
-    /// The control vertices of patch `patch` (`GetPatchVertices`), as
-    /// indices into the concatenated control values. Phantom boundary
-    /// slots of regular patches are omitted; for Gregory patches this is
-    /// the union of the vertices supporting its derived points.
-    pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
-        match self.patch_ref(patch) {
+    /// The control values `patch` depends on (see
+    /// [`PatchTable::patch_vertices`]).
+    fn vertices(&self, patch: PatchRef<'_>) -> Vec<Index> {
+        match patch {
             PatchRef::Regular(cvs) => cvs
                 .iter()
                 .copied()
@@ -622,36 +581,15 @@ impl PatchTable {
         }
     }
 
-    /// The sharpness of the semi-sharp crease carried by patch `patch`
-    /// (`GetSingleCreasePatchSharpnessValue`): positive for single-crease
-    /// patches — [`PatchType::Regular`] patches bounded by a semi-sharp
-    /// crease, built when the refiner enabled
-    /// [`AdaptiveOptions::use_single_crease_patch`](super::AdaptiveOptions::use_single_crease_patch)
-    /// — and `0.0` for every other patch.
-    pub fn single_crease_sharpness(&self, patch: usize) -> f32 {
-        match self.patch_ref(patch) {
-            PatchRef::SingleCrease { sharpness, .. } => sharpness,
-            _ => 0.0,
-        }
-    }
-
-    /// The ptex indexing of the base mesh.
-    pub fn ptex_indices(&self) -> &PtexIndices {
-        &self.ptex
-    }
-
-    /// The number of control values patch evaluation expects: one value per
-    /// vertex of every refinement level, base level first
-    /// (`GetNumControlVertices`).
-    pub fn num_control_values(&self) -> usize {
-        self.num_control_values
-    }
-
-    /// Evaluate the patch basis at a location given in the parametric space
-    /// of the patch's *ptex face* (`EvaluateBasis`): returns point and
-    /// first-derivative weights on the patch's control vertices.
-    pub fn evaluate_basis(&self, patch: usize, u: f32, v: f32) -> PatchBasis {
-        let param = self.patch_param(patch);
+    /// The basis of `patch`, parameterized by `param`, at ptex-face
+    /// coordinates `(u, v)` (see [`PatchTable::evaluate_basis`]).
+    fn evaluate_basis(
+        &self,
+        patch: PatchRef<'_>,
+        param: &PatchParam,
+        u: f32,
+        v: f32,
+    ) -> PatchBasis {
         let (s, t) = param.normalize(u, v);
         // Chain rule to ptex frame: dP/du = Ps·ds/du + Pt·dt/du with
         // m = [ds/du, ds/dv, dt/du, dt/dv].
@@ -676,7 +614,7 @@ impl PatchTable {
             }
         };
 
-        match self.patch_ref(patch) {
+        match patch {
             PatchRef::Regular(cvs) => {
                 let (bu, dbu) = bspline_basis(s);
                 let (bv, dbv) = bspline_basis(t);
@@ -775,6 +713,191 @@ impl PatchTable {
         }
         basis
     }
+}
+
+/// The face-varying patches of one channel of a [`PatchTable`]
+/// (`Far::PatchTable::FVarPatchChannel`): one per patch of the table, over
+/// the same parametric domain, but built from the channel's own topology —
+/// its value mesh at the patch's level.
+#[derive(Debug, Clone)]
+struct FVarPatches {
+    /// The refiner's index of the channel.
+    channel: usize,
+    linear_interpolation: FVarLinearInterpolation,
+    /// The number of face-varying values the patches index into.
+    num_values: usize,
+    patches: PatchArrays,
+    /// Per patch: the index in `patches.arrays` of the array holding its
+    /// face-varying patch, and its offset within that array. Both are empty
+    /// when one array holds every patch (always so for linear patches): the
+    /// offset is then the patch index.
+    arrays: Vec<u8>,
+    offsets: Vec<u32>,
+}
+
+impl FVarPatches {
+    /// The array holding the face-varying patch of `patch`, and the
+    /// patch's offset within it.
+    fn locate(&self, patch: usize) -> (&PatchArray, usize) {
+        if self.offsets.is_empty() {
+            (&self.patches.arrays[0], patch)
+        } else {
+            let array = &self.patches.arrays[self.arrays[patch] as usize];
+            (array, self.offsets[patch] as usize)
+        }
+    }
+
+    fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
+        let (array, offset) = self.locate(patch);
+        self.patches.patch_ref(array, offset)
+    }
+}
+
+/// A table of patches describing the limit surface of a refined mesh
+/// (`Far::PatchTable`).
+///
+/// Patches may live at *mixed depths* (feature-adaptive refinement emits a
+/// patch at the level where its face becomes regular). Control-vertex
+/// indices refer to the **concatenation of every level's vertices**, base
+/// level first — the buffer produced by evaluating
+/// [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
+/// level by level and appending each result to the base values
+/// ([`num_control_values`](Self::num_control_values) in total).
+///
+/// As in OpenSubdiv's patch arrays, patches are grouped by type: indices
+/// run through the regular patches (single-crease ones last), then the
+/// Gregory, quad, Loop, Gregory-triangle and linear-triangle patches, each
+/// group with its control vertices in one flat buffer and every patch's
+/// [`PatchParam`] packed into 8 bytes. Within a group, patches follow
+/// their faces level by level. Use [`PatchMap::find_patch`] to locate the
+/// patch covering a ptex location.
+///
+/// ## Face-varying patches
+///
+/// Built with [`PatchTableOptions::generate_fvar_tables`], the table also
+/// holds, per face-varying channel, one patch for each of its patches
+/// (`GetPatchFVarValues`, `EvaluateBasisFaceVarying`). A channel's patch
+/// covers the same domain as the vertex patch of the same index — the
+/// patch [`PatchMap::find_patch`] returns serves both — but its type and
+/// control values come from the channel's own topology, so seams, and the
+/// channel's [`FVarLinearInterpolation`], are respected: see
+/// [`fvar_patch_type`](Self::fvar_patch_type). Its control values are the
+/// channel's values at every level, base level first
+/// ([`num_fvar_values`](Self::num_fvar_values) in total): the base values
+/// the channel was described with, followed by each level's
+/// [`PrimvarRefiner::interpolate_face_varying`](super::PrimvarRefiner::interpolate_face_varying)
+/// output.
+#[derive(Debug, Clone)]
+pub struct PatchTable {
+    /// The patches, grouped into arrays.
+    patches: PatchArrays,
+    /// Per patch: its parameterization.
+    params: Vec<PackedPatchParam>,
+    /// Per patch: the face it covers.
+    faces: Vec<Index>,
+    /// Per level: patch index of each face (`INDEX_INVALID` where no patch
+    /// was emitted — holes, refined faces, or unsupported support faces).
+    face_to_patch: Vec<Vec<Index>>,
+    ptex: PtexIndices,
+    max_level: usize,
+    /// Per refinement step: first child face of each parent face
+    /// (`INDEX_INVALID` for faces without children under sparse
+    /// refinement).
+    first_child: Vec<Vec<Index>>,
+    /// Total control values (sum of all levels' vertex counts).
+    num_control_values: usize,
+    /// Are the patches triangular (the Loop scheme)?
+    triangular: bool,
+    /// The face-varying patches of each channel the table was built for.
+    fvar: Vec<FVarPatches>,
+}
+
+impl PatchTable {
+    /// The number of patches in the table (`GetNumPatchesTotal`).
+    pub fn num_patches(&self) -> usize {
+        self.params.len()
+    }
+
+    /// The array holding patch `patch`, and the patch's offset within it.
+    fn locate(&self, patch: usize) -> (&PatchArray, usize) {
+        assert!(
+            patch < self.num_patches(),
+            "patch {patch} out of range ({} patches)",
+            self.num_patches()
+        );
+        let array = self
+            .patches
+            .arrays
+            .iter()
+            .rfind(|array| array.start <= patch)
+            .expect("a non-empty table has an array starting at patch 0");
+        (array, patch - array.start)
+    }
+
+    /// The data of patch `patch`.
+    fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
+        let (array, offset) = self.locate(patch);
+        self.patches.patch_ref(array, offset)
+    }
+
+    /// The basis type of patch `patch`.
+    pub fn patch_type(&self, patch: usize) -> PatchType {
+        self.locate(patch).0.kind.patch_type()
+    }
+
+    /// The [`PatchParam`] of patch `patch` (`GetPatchParam`).
+    pub fn patch_param(&self, patch: usize) -> PatchParam {
+        self.params[patch].unpack()
+    }
+
+    /// The face covered by patch `patch`, within the level given by the
+    /// patch's [`PatchParam::depth`] ancestry (for uniform refiners, the
+    /// last level).
+    pub fn patch_face(&self, patch: usize) -> Index {
+        self.faces[patch]
+    }
+
+    /// The control vertices of patch `patch` (`GetPatchVertices`), as
+    /// indices into the concatenated control values. Phantom boundary
+    /// slots of regular patches are omitted; for Gregory patches this is
+    /// the union of the vertices supporting its derived points.
+    pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
+        self.patches.vertices(self.patch_ref(patch))
+    }
+
+    /// The sharpness of the semi-sharp crease carried by patch `patch`
+    /// (`GetSingleCreasePatchSharpnessValue`): positive for single-crease
+    /// patches — [`PatchType::Regular`] patches bounded by a semi-sharp
+    /// crease, built when the refiner enabled
+    /// [`AdaptiveOptions::use_single_crease_patch`](super::AdaptiveOptions::use_single_crease_patch)
+    /// — and `0.0` for every other patch.
+    pub fn single_crease_sharpness(&self, patch: usize) -> f32 {
+        match self.patch_ref(patch) {
+            PatchRef::SingleCrease { sharpness, .. } => sharpness,
+            _ => 0.0,
+        }
+    }
+
+    /// The ptex indexing of the base mesh.
+    pub fn ptex_indices(&self) -> &PtexIndices {
+        &self.ptex
+    }
+
+    /// The number of control values patch evaluation expects: one value per
+    /// vertex of every refinement level, base level first
+    /// (`GetNumControlVertices`).
+    pub fn num_control_values(&self) -> usize {
+        self.num_control_values
+    }
+
+    /// Evaluate the patch basis at a location given in the parametric space
+    /// of the patch's *ptex face* (`EvaluateBasis`): returns point and
+    /// first-derivative weights on the patch's control vertices.
+    pub fn evaluate_basis(&self, patch: usize, u: f32, v: f32) -> PatchBasis {
+        let param = self.patch_param(patch);
+        self.patches
+            .evaluate_basis(self.patch_ref(patch), &param, u, v)
+    }
 
     /// Evaluate primvar data on patch `patch` at ptex-face coordinates
     /// `(u, v)`: returns the limit point and its two first derivatives.
@@ -788,25 +911,164 @@ impl PatchTable {
         v: f32,
         control_values: &[T],
     ) -> (T, T, T) {
-        let basis = self.evaluate_basis(patch, u, v);
-        let mut point = control_values[0].clone();
-        let mut du = control_values[0].clone();
-        let mut dv = control_values[0].clone();
-        point.clear();
-        du.clear();
-        dv.clear();
-        for (k, &cv) in basis.indices.iter().enumerate() {
-            let value = &control_values[cv as usize];
-            point.add_with_weight(value, basis.weights[k]);
-            du.add_with_weight(value, basis.du_weights[k]);
-            dv.add_with_weight(value, basis.dv_weights[k]);
-        }
-        (point, du, dv)
+        combine(&self.evaluate_basis(patch, u, v), control_values)
     }
+
+    // ------------------------------------------------------------------
+    //  Face-varying patches
+    // ------------------------------------------------------------------
+
+    /// The number of face-varying channels the table holds patches for
+    /// (`GetNumFVarChannels`): none unless it was built with
+    /// [`PatchTableOptions::generate_fvar_tables`].
+    pub fn num_fvar_channels(&self) -> usize {
+        self.fvar.len()
+    }
+
+    /// The face-varying patches of table channel `channel`.
+    fn fvar(&self, channel: usize) -> &FVarPatches {
+        assert!(
+            channel < self.fvar.len(),
+            "face-varying channel {channel} out of range ({} channels in the table)",
+            self.fvar.len()
+        );
+        &self.fvar[channel]
+    }
+
+    /// The face-varying data of patch `patch` in table channel `channel`.
+    fn fvar_patch_ref(&self, patch: usize, channel: usize) -> PatchRef<'_> {
+        self.locate(patch); // range check
+        self.fvar(channel).patch_ref(patch)
+    }
+
+    /// The [`TopologyRefiner`]'s index of table channel `channel`: the
+    /// channel's position in [`PatchTableOptions::fvar_channels`], or the
+    /// channel itself when the table was built for every channel.
+    pub fn fvar_refiner_channel(&self, channel: usize) -> usize {
+        self.fvar(channel).channel
+    }
+
+    /// The linear-interpolation rule of table channel `channel`
+    /// (`GetFVarChannelLinearInterpolation`).
+    pub fn fvar_channel_linear_interpolation(&self, channel: usize) -> FVarLinearInterpolation {
+        self.fvar(channel).linear_interpolation
+    }
+
+    /// The number of face-varying values the patches of table channel
+    /// `channel` expect (`GetNumFVarValues`): the channel's values at every
+    /// refinement level, base level first — at the base level, the values
+    /// the channel was described with.
+    pub fn num_fvar_values(&self, channel: usize) -> usize {
+        self.fvar(channel).num_values
+    }
+
+    /// The basis type of the face-varying patch of `patch` in table channel
+    /// `channel` (`GetFVarPatchDescriptor`, per patch).
+    ///
+    /// The type follows the channel's topology at the patch's level, and may
+    /// differ from [`patch_type`](Self::patch_type):
+    ///
+    /// * linear patches — [`PatchType::Quads`], or [`PatchType::Triangles`]
+    ///   for the Loop scheme — when the channel's interpolation is
+    ///   [`FVarLinearInterpolation::All`], for the Bilinear scheme, and for
+    ///   every channel when the table was built with
+    ///   [`PatchTableOptions::generate_fvar_legacy_linear_patches`];
+    /// * otherwise the patch the vertex topology would get from the
+    ///   channel's value mesh: [`PatchType::Regular`] (including
+    ///   single-crease patches) or [`PatchType::Loop`] where the channel is
+    ///   regular around the face — seams act as infinitely sharp
+    ///   boundaries, and the channel's interpolation rule as pinned corners
+    ///   — and Gregory end caps ([`PatchType::GregoryBasis`],
+    ///   [`PatchType::GregoryTriangle`]) where it is not. A face regular in
+    ///   the vertex topology can be irregular in a channel's; refine with
+    ///   [`AdaptiveOptions::consider_fvar_channels`](super::AdaptiveOptions::consider_fvar_channels)
+    ///   to isolate such faces as well, rather than capping them at a
+    ///   coarser level.
+    pub fn fvar_patch_type(&self, patch: usize, channel: usize) -> PatchType {
+        self.locate(patch);
+        self.fvar(channel).locate(patch).0.kind.patch_type()
+    }
+
+    /// The face-varying values of `patch` in table channel `channel`
+    /// (`GetPatchFVarValues`), as indices into the channel's concatenated
+    /// values, laid out and filtered as
+    /// [`patch_vertices`](Self::patch_vertices) does.
+    pub fn fvar_patch_values(&self, patch: usize, channel: usize) -> Vec<Index> {
+        let fvar = self.fvar(channel);
+        fvar.patches.vertices(self.fvar_patch_ref(patch, channel))
+    }
+
+    /// The [`PatchParam`] of the face-varying patch of `patch` in table
+    /// channel `channel` (`GetPatchFVarPatchParam`): face-varying patches
+    /// share their vertex patch's domain, so this is
+    /// [`patch_param`](Self::patch_param).
+    pub fn fvar_patch_param(&self, patch: usize, channel: usize) -> PatchParam {
+        self.fvar(channel);
+        self.patch_param(patch)
+    }
+
+    /// Evaluate the face-varying patch basis of `patch` in table channel
+    /// `channel` at ptex-face coordinates `(u, v)`
+    /// (`EvaluateBasisFaceVarying`): point and first-derivative weights on
+    /// the channel's concatenated values, at the same location
+    /// [`evaluate_basis`](Self::evaluate_basis) evaluates the vertex patch.
+    pub fn evaluate_basis_face_varying(
+        &self,
+        patch: usize,
+        u: f32,
+        v: f32,
+        channel: usize,
+    ) -> PatchBasis {
+        let param = self.patch_param(patch);
+        let fvar = self.fvar(channel);
+        fvar.patches
+            .evaluate_basis(self.fvar_patch_ref(patch, channel), &param, u, v)
+    }
+
+    /// Evaluate face-varying data of table channel `channel` on patch
+    /// `patch` at ptex-face coordinates `(u, v)`: returns the value and its
+    /// two first derivatives. `values` holds the channel's values at every
+    /// refinement level, base level first
+    /// ([`num_fvar_values`](Self::num_fvar_values) in total; see
+    /// [`PrimvarRefiner::interpolate_face_varying_all`](super::PrimvarRefiner::interpolate_face_varying_all)).
+    pub fn evaluate_face_varying<T: Primvar>(
+        &self,
+        patch: usize,
+        u: f32,
+        v: f32,
+        values: &[T],
+        channel: usize,
+    ) -> (T, T, T) {
+        combine(
+            &self.evaluate_basis_face_varying(patch, u, v, channel),
+            values,
+        )
+    }
+}
+
+/// Apply `basis` to `values`: the point and its two first derivatives.
+fn combine<T: Primvar>(basis: &PatchBasis, values: &[T]) -> (T, T, T) {
+    let mut point = values[0].clone();
+    let mut du = values[0].clone();
+    let mut dv = values[0].clone();
+    point.clear();
+    du.clear();
+    dv.clear();
+    for (k, &cv) in basis.indices.iter().enumerate() {
+        let value = &values[cv as usize];
+        point.add_with_weight(value, basis.weights[k]);
+        du.add_with_weight(value, basis.du_weights[k]);
+        dv.add_with_weight(value, basis.dv_weights[k]);
+    }
+    (point, du, dv)
 }
 
 /// Accelerated location of the patch covering a `(ptex face, u, v)`
 /// location (`Far::PatchMap`).
+///
+/// The patch it returns also indexes the table's face-varying patches,
+/// which share their vertex patch's domain
+/// ([`PatchTable::evaluate_basis_face_varying`]).
 pub struct PatchMap<'a> {
     table: &'a PatchTable,
 }
@@ -863,13 +1125,76 @@ impl<'a> PatchMap<'a> {
     }
 }
 
+/// Options controlling [`PatchTableFactory::create_with_options`]
+/// (`Far::PatchTableFactory::Options`).
+#[derive(Debug, Clone)]
+pub struct PatchTableOptions {
+    /// Build face-varying patches (`generateFVarTables`): for each selected
+    /// channel, one patch per patch of the table, evaluated with
+    /// [`PatchTable::evaluate_basis_face_varying`]. Off by default, as in
+    /// OpenSubdiv.
+    pub generate_fvar_tables: bool,
+    /// The refiner channels to build face-varying patches for, in the order
+    /// the table numbers them (`numFVarChannels` / `fvarChannelIndices`);
+    /// `None` selects every channel of the refiner. Ignored unless
+    /// [`generate_fvar_tables`](Self::generate_fvar_tables) is set.
+    pub fvar_channels: Option<Vec<usize>>,
+    /// Build every face-varying patch as a linear patch over its refined
+    /// face, whatever the channel's interpolation
+    /// (`generateFVarLegacyLinearPatches`). On by default, as in
+    /// OpenSubdiv: turn it off for smooth face-varying patches that follow
+    /// each channel's own topology and
+    /// [`FVarLinearInterpolation`].
+    pub generate_fvar_legacy_linear_patches: bool,
+}
+
+impl Default for PatchTableOptions {
+    fn default() -> Self {
+        Self {
+            generate_fvar_tables: false,
+            fvar_channels: None,
+            generate_fvar_legacy_linear_patches: true,
+        }
+    }
+}
+
+impl PatchTableOptions {
+    /// Options with every field set to its OpenSubdiv default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable face-varying patches
+    /// ([`generate_fvar_tables`](Self::generate_fvar_tables)).
+    pub fn with_fvar_tables(mut self, enabled: bool) -> Self {
+        self.generate_fvar_tables = enabled;
+        self
+    }
+
+    /// Build face-varying patches for the refiner channels `channels` only,
+    /// numbered in that order in the table
+    /// ([`fvar_channels`](Self::fvar_channels)).
+    pub fn with_fvar_channels(mut self, channels: &[usize]) -> Self {
+        self.fvar_channels = Some(channels.to_vec());
+        self
+    }
+
+    /// Enable or disable legacy linear face-varying patches
+    /// ([`generate_fvar_legacy_linear_patches`](Self::generate_fvar_legacy_linear_patches)).
+    pub fn with_fvar_legacy_linear_patches(mut self, enabled: bool) -> Self {
+        self.generate_fvar_legacy_linear_patches = enabled;
+        self
+    }
+}
+
 /// Factory constructing a [`PatchTable`] from a refined [`TopologyRefiner`]
 /// (`Far::PatchTableFactory`).
 pub struct PatchTableFactory;
 
 impl PatchTableFactory {
     /// Build a [`PatchTable`] covering the limit surface of `refiner`
-    /// (`PatchTableFactory::Create`).
+    /// (`PatchTableFactory::Create`), with the default
+    /// [`PatchTableOptions`]: vertex patches only.
     ///
     /// # Errors
     ///
@@ -880,6 +1205,86 @@ impl PatchTableFactory {
     /// than [`PatchParam::MAX_DEPTH`] below its ptex face (uniform
     /// refinement past that level).
     pub fn create(refiner: &TopologyRefiner) -> Result<PatchTable, TopologyError> {
+        Self::create_with_options(refiner, &PatchTableOptions::default())
+    }
+
+    /// Build a [`PatchTable`] covering the limit surface of `refiner`, and
+    /// the face-varying patches `options` asks for
+    /// (`PatchTableFactory::Create` with `Options`).
+    ///
+    /// # Errors
+    ///
+    /// As [`create`](Self::create), and
+    /// [`TopologyError::FVarChannelOutOfRange`] when
+    /// [`PatchTableOptions::fvar_channels`] names a channel the refiner
+    /// does not have.
+    ///
+    /// # Example
+    ///
+    /// Evaluate a seamed UV chart at the same location as the surface:
+    ///
+    /// ```
+    /// use opensubdiv_rs::far::{
+    ///     AdaptiveOptions, FVarChannelDescriptor, PatchMap, PatchTableFactory,
+    ///     PatchTableOptions, PrimvarRefiner, TopologyDescriptor, TopologyRefinerFactory,
+    /// };
+    /// use opensubdiv_rs::sdc;
+    ///
+    /// // Two quads whose shared edge is a UV seam.
+    /// let face_verts = [0u32, 1, 4, 3, 1, 2, 5, 4];
+    /// let uv_indices = [0u32, 1, 2, 3, 4, 5, 6, 7];
+    /// let uvs: Vec<[f32; 2]> = vec![
+    ///     [0.0, 0.0], [0.45, 0.0], [0.45, 1.0], [0.0, 1.0],
+    ///     [0.55, 0.0], [1.0, 0.0], [1.0, 1.0], [0.55, 1.0],
+    /// ];
+    /// let channels = [FVarChannelDescriptor::new(uvs.len(), &uv_indices)];
+    /// let descriptor = TopologyDescriptor::new(6, &[4, 4], &face_verts)
+    ///     .with_fvar_channels(&channels);
+    /// let mut refiner = TopologyRefinerFactory::create(
+    ///     descriptor,
+    ///     sdc::SchemeType::Catmark,
+    ///     sdc::Options::default(),
+    /// )?;
+    /// refiner.refine_adaptive(AdaptiveOptions::new(3).with_consider_fvar_channels(true));
+    ///
+    /// let options = PatchTableOptions::new()
+    ///     .with_fvar_tables(true)
+    ///     .with_fvar_legacy_linear_patches(false);
+    /// let table = PatchTableFactory::create_with_options(&refiner, &options)?;
+    ///
+    /// // The channel's values at every level, base level first.
+    /// let mut values = uvs.clone();
+    /// for level in PrimvarRefiner::new(&refiner).interpolate_face_varying_all(0, &uvs) {
+    ///     values.extend(level);
+    /// }
+    /// assert_eq!(values.len(), table.num_fvar_values(0));
+    ///
+    /// let patch = PatchMap::new(&table).find_patch(1, 0.0, 0.5).unwrap();
+    /// let (uv, _du, _dv) = table.evaluate_face_varying(patch, 0.0, 0.5, &values, 0);
+    /// // On the seam, face 1 takes its own side of the chart.
+    /// assert!((uv[0] - 0.55).abs() < 1e-6);
+    /// # Ok::<(), opensubdiv_rs::vtr::TopologyError>(())
+    /// ```
+    pub fn create_with_options(
+        refiner: &TopologyRefiner,
+        options: &PatchTableOptions,
+    ) -> Result<PatchTable, TopologyError> {
+        let num_channels = refiner.num_fvar_channels();
+        let fvar_channels: Vec<usize> = match (&options.fvar_channels, options.generate_fvar_tables)
+        {
+            (_, false) => Vec::new(),
+            (None, true) => (0..num_channels).collect(),
+            (Some(channels), true) => {
+                if let Some(&channel) = channels.iter().find(|&&c| c >= num_channels) {
+                    return Err(TopologyError::FVarChannelOutOfRange {
+                        channel,
+                        num_channels,
+                    });
+                }
+                channels.clone()
+            }
+        };
+
         let scheme_type = refiner.scheme_type();
         let triangular = scheme_type.topological_split_type() == Split::ToTris;
         let base = refiner.level(0);
@@ -920,9 +1325,12 @@ impl PatchTableFactory {
 
         // Each patch goes to the array of its kind; `face_to_patch` holds
         // its offset there, and `face_kind` the array, until the arrays are
-        // laid out one after another.
-        let mut builders: [ArrayBuilder; 7] = Default::default();
-        let mut local_points = LocalPoints::default();
+        // laid out one after another. The per-patch data — parameterization,
+        // face and level — is gathered per kind too.
+        let mut builder = PatchArraysBuilder::default();
+        let mut params: [Vec<PackedPatchParam>; 7] = Default::default();
+        let mut faces: [Vec<Index>; 7] = Default::default();
+        let mut levels: [Vec<u8>; 7] = Default::default();
         let mut face_to_patch: Vec<Vec<Index>> = (0..=max_level)
             .map(|l| vec![INDEX_INVALID; refiner.level(l).num_faces()])
             .collect();
@@ -953,112 +1361,20 @@ impl PatchTableFactory {
                         max: PatchParam::MAX_DEPTH as usize,
                     })?;
                 debug_assert!(same_param(&packed.unpack(), &param));
-                // Phantom slots stay `INDEX_INVALID`; real ones move into
-                // the concatenated control values.
-                let shift = |cvs: &mut [Index]| {
-                    for cv in cvs.iter_mut().filter(|cv| **cv != INDEX_INVALID) {
-                        *cv += offset;
-                    }
-                };
-                let builder = |kind: ArrayKind| kind as usize;
-                let kind = match scheme_type {
-                    SchemeType::Catmark => {
-                        if let Some(mut cvs) = gather_regular_patch(inner, face) {
-                            shift(&mut cvs);
-                            builders[builder(ArrayKind::Regular)].cvs.extend(cvs);
-                            ArrayKind::Regular
-                        } else if let Some(mut patch) = single_crease
-                            .then(|| single_crease_patch(inner, face))
-                            .flatten()
-                        {
-                            shift(&mut patch.cvs);
-                            let array = &mut builders[builder(ArrayKind::SingleCrease)];
-                            array.cvs.extend(patch.cvs);
-                            array.creases.push((patch.sharpness, patch.edge));
-                            ArrayKind::SingleCrease
-                        } else if let Some(points) = gregory::build(inner, face) {
-                            // Irregular neighborhood (extraordinary, boundary,
-                            // crease, sharp, dart or non-manifold corners):
-                            // Gregory end cap.
-                            builders[builder(ArrayKind::Gregory)]
-                                .end_caps
-                                .push(local_points.push(&points, offset));
-                            ArrayKind::Gregory
-                        } else {
-                            // Unsharpened boundary or non-quad ring: bilinear
-                            // fallback.
-                            let mut cvs = quad_cvs(inner, face);
-                            shift(&mut cvs);
-                            builders[builder(ArrayKind::Quads)].cvs.extend(cvs);
-                            ArrayKind::Quads
-                        }
-                    }
-                    SchemeType::Loop => {
-                        if let Some(mut cvs) = loop_patch::gather_regular_patch(inner, face) {
-                            shift(&mut cvs);
-                            builders[builder(ArrayKind::Loop)].cvs.extend(cvs);
-                            ArrayKind::Loop
-                        } else if let Some(points) = loop_patch::build(inner, face) {
-                            builders[builder(ArrayKind::GregoryTriangle)]
-                                .end_caps
-                                .push(local_points.push(&points, offset));
-                            ArrayKind::GregoryTriangle
-                        } else {
-                            // Unsharpened boundary: linear fallback.
-                            let mut cvs = tri_cvs(inner, face);
-                            shift(&mut cvs);
-                            builders[builder(ArrayKind::Triangles)].cvs.extend(cvs);
-                            ArrayKind::Triangles
-                        }
-                    }
-                    // Bilinear: the mesh is its own limit surface.
-                    SchemeType::Bilinear => {
-                        let mut cvs = quad_cvs(inner, face);
-                        shift(&mut cvs);
-                        builders[builder(ArrayKind::Quads)].cvs.extend(cvs);
-                        ArrayKind::Quads
-                    }
-                };
-                let array = &mut builders[builder(kind)];
-                *patch_slot = array.params.len() as Index;
+                let source = classify_patch(inner, face, scheme_type, false, single_crease);
+                let (kind, index) = builder.push(source, |cv| cv + offset);
+                *patch_slot = index as Index;
                 *kind_slot = kind as u8;
-                array.params.push(packed);
-                array.faces.push(face as Index);
+                params[kind as usize].push(packed);
+                faces[kind as usize].push(face as Index);
+                levels[kind as usize].push(level as u8);
             }
         }
 
-        // Lay the arrays out one after another, in `ArrayKind` order, with
-        // exactly the capacity they need.
-        let total_of = |f: fn(&ArrayBuilder) -> usize| builders.iter().map(f).sum::<usize>();
-        let num_patches = total_of(|b| b.params.len());
-        let mut arrays = Vec::new();
-        let mut params = Vec::with_capacity(num_patches);
-        let mut faces = Vec::with_capacity(num_patches);
-        let mut cvs = Vec::with_capacity(total_of(|b| b.cvs.len()));
-        let mut creases = Vec::with_capacity(total_of(|b| b.creases.len()));
-        let mut end_caps = Vec::with_capacity(total_of(|b| b.end_caps.len()));
-        let mut starts = [0usize; 7];
-        for (kind, builder) in ArrayKind::ALL.into_iter().zip(builders) {
-            starts[kind as usize] = params.len();
-            if builder.params.is_empty() {
-                continue;
-            }
-            arrays.push(PatchArray {
-                kind,
-                start: params.len(),
-                first_cv: cvs.len(),
-                first_aux: match kind {
-                    ArrayKind::SingleCrease => creases.len(),
-                    ArrayKind::Gregory | ArrayKind::GregoryTriangle => end_caps.len(),
-                    _ => 0,
-                },
-            });
-            params.extend(builder.params);
-            faces.extend(builder.faces);
-            cvs.extend(builder.cvs);
-            creases.extend(builder.creases);
-            end_caps.extend(builder.end_caps);
-        }
+        let (patches, starts) = builder.finish();
+        let params: Vec<PackedPatchParam> = flatten(params);
+        let faces: Vec<Index> = flatten(faces);
+        let levels: Vec<u8> = flatten(levels);
         for (patches, kinds) in face_to_patch.iter_mut().zip(&face_kind) {
             for (patch, &kind) in patches.iter_mut().zip(kinds) {
                 if *patch != INDEX_INVALID {
@@ -1067,34 +1383,290 @@ impl PatchTableFactory {
             }
         }
 
-        local_points.shrink_to_fit();
+        let fvar = fvar_channels
+            .into_iter()
+            .map(|channel| {
+                build_fvar_patches(
+                    refiner,
+                    channel,
+                    options.generate_fvar_legacy_linear_patches,
+                    &levels,
+                    &faces,
+                )
+            })
+            .collect();
+
         Ok(PatchTable {
-            arrays,
+            patches,
             params,
             faces,
-            cvs,
-            creases,
-            end_caps,
-            local_points,
             face_to_patch,
             ptex,
             max_level,
             first_child,
             num_control_values: total,
             triangular,
+            fvar,
         })
     }
 }
 
-/// The patches of one [`ArrayKind`] while [`PatchTableFactory::create`]
-/// builds them.
+/// The per-kind vectors `arrays` concatenated in [`ArrayKind`] order, with
+/// exactly the capacity they need.
+fn flatten<T>(arrays: [Vec<T>; 7]) -> Vec<T> {
+    let mut flat = Vec::with_capacity(arrays.iter().map(Vec::len).sum());
+    arrays.into_iter().for_each(|array| flat.extend(array));
+    flat
+}
+
+/// Build the face-varying patches of refiner channel `channel`: for each
+/// patch of the table, in table order, the patch its face gets from the
+/// channel's value mesh at the patch's level (`levels`, `faces`).
+fn build_fvar_patches(
+    refiner: &TopologyRefiner,
+    channel: usize,
+    legacy_linear: bool,
+    levels: &[u8],
+    faces: &[Index],
+) -> FVarPatches {
+    let fvar = refiner.fvar_channel(channel);
+    let scheme_type = refiner.scheme_type();
+    let linear = legacy_linear || fvar.is_linear();
+    let single_crease = refiner.uses_single_crease_patch();
+
+    // The channel's values are the concatenation of every level's: the
+    // caller's at the base level, the value mesh's vertices above.
+    let mut level_offsets = Vec::with_capacity(refiner.num_levels());
+    let mut num_values = 0usize;
+    for l in 0..refiner.num_levels() {
+        level_offsets.push(num_values as Index);
+        num_values += fvar.num_values(l);
+    }
+    // A base value-mesh vertex split off a value index reused at several
+    // vertices refers back to that index.
+    let base_sources = fvar.base_value_sources();
+
+    let mut builder = PatchArraysBuilder::default();
+    let mut kinds = Vec::with_capacity(faces.len());
+    let mut offsets = Vec::with_capacity(faces.len());
+    for (&level, &face) in levels.iter().zip(faces) {
+        let level = level as usize;
+        let source = classify_patch(
+            fvar.level(level),
+            face as usize,
+            scheme_type,
+            linear,
+            single_crease,
+        );
+        let (kind, offset) = match (level, base_sources) {
+            (0, Some(sources)) => builder.push(source, |value| sources[value as usize]),
+            _ => {
+                let first = level_offsets[level];
+                builder.push(source, |value| value + first)
+            }
+        };
+        kinds.push(kind);
+        offsets.push(offset as u32);
+    }
+
+    let (patches, _) = builder.finish();
+    let (arrays, offsets) = if patches.arrays.len() <= 1 {
+        (Vec::new(), Vec::new())
+    } else {
+        let array_of = |kind: ArrayKind| {
+            let index = patches.arrays.iter().position(|a| a.kind == kind);
+            index.expect("every patch kind used has an array") as u8
+        };
+        (kinds.into_iter().map(array_of).collect(), offsets)
+    };
+    FVarPatches {
+        channel,
+        linear_interpolation: fvar.linear_interpolation(),
+        num_values,
+        patches,
+        arrays,
+        offsets,
+    }
+}
+
+/// The patch a face gets, before its control indices move into a table.
+enum PatchSource {
+    /// A patch stored as its control vertices: the first
+    /// [`ArrayKind::num_cvs`] entries, phantom slots `INDEX_INVALID`.
+    Cvs(ArrayKind, [Index; 16]),
+    SingleCrease(SingleCrease),
+    Gregory(gregory::GregoryPoints),
+    GregoryTriangle(loop_patch::GregoryTriPoints),
+}
+
+/// The patch covering `face` of `level` — the geometry's level, or a
+/// face-varying channel's value mesh at that level. `linear` asks for a
+/// linear patch over the face whatever its neighborhood.
+fn classify_patch(
+    level: &Level,
+    face: usize,
+    scheme_type: SchemeType,
+    linear: bool,
+    single_crease: bool,
+) -> PatchSource {
+    let linear_patch = || {
+        let fv = level.face_vertices(face);
+        let mut cvs = [INDEX_INVALID; 16];
+        cvs[..fv.len()].copy_from_slice(fv);
+        let kind = if fv.len() == 3 {
+            ArrayKind::Triangles
+        } else {
+            ArrayKind::Quads
+        };
+        debug_assert_eq!(fv.len(), kind.num_cvs());
+        PatchSource::Cvs(kind, cvs)
+    };
+    if linear {
+        return linear_patch();
+    }
+    match scheme_type {
+        SchemeType::Catmark => {
+            if let Some(cvs) = gather_regular_patch(level, face) {
+                PatchSource::Cvs(ArrayKind::Regular, cvs)
+            } else if let Some(patch) = single_crease
+                .then(|| single_crease_patch(level, face))
+                .flatten()
+            {
+                PatchSource::SingleCrease(patch)
+            } else if let Some(points) = gregory::build(level, face) {
+                // Irregular neighborhood (extraordinary, boundary, crease,
+                // sharp, dart or non-manifold corners): Gregory end cap.
+                PatchSource::Gregory(points)
+            } else {
+                // Unsharpened boundary or non-quad ring: bilinear fallback.
+                linear_patch()
+            }
+        }
+        SchemeType::Loop => {
+            if let Some(loop_cvs) = loop_patch::gather_regular_patch(level, face) {
+                let mut cvs = [INDEX_INVALID; 16];
+                cvs[..12].copy_from_slice(&loop_cvs);
+                PatchSource::Cvs(ArrayKind::Loop, cvs)
+            } else if let Some(points) = loop_patch::build(level, face) {
+                PatchSource::GregoryTriangle(points)
+            } else {
+                // Unsharpened boundary: linear fallback.
+                linear_patch()
+            }
+        }
+        // Bilinear: the mesh is its own limit surface.
+        SchemeType::Bilinear => linear_patch(),
+    }
+}
+
+/// The patches of one [`ArrayKind`] while a table is built.
 #[derive(Default)]
 struct ArrayBuilder {
-    params: Vec<PackedPatchParam>,
-    faces: Vec<Index>,
+    len: usize,
     cvs: Vec<Index>,
     creases: Vec<(f32, u8)>,
     end_caps: Vec<LocalPointRange>,
+}
+
+/// [`PatchArrays`] under construction: patches are added in any order of
+/// kinds, then laid out array by array.
+#[derive(Default)]
+struct PatchArraysBuilder {
+    arrays: [ArrayBuilder; 7],
+    local_points: LocalPoints,
+}
+
+impl PatchArraysBuilder {
+    /// Add the patch `source`, moving its control indices into the table's
+    /// control values with `map` (phantom slots stay `INDEX_INVALID`).
+    /// Returns the patch's kind and its offset within that kind's array.
+    fn push(&mut self, source: PatchSource, map: impl Fn(Index) -> Index) -> (ArrayKind, usize) {
+        let shift = |cv: Index| {
+            if cv == INDEX_INVALID {
+                cv
+            } else {
+                map(cv)
+            }
+        };
+        let kind = match source {
+            PatchSource::Cvs(kind, cvs) => {
+                let array = &mut self.arrays[kind as usize];
+                array
+                    .cvs
+                    .extend(cvs[..kind.num_cvs()].iter().map(|&cv| shift(cv)));
+                kind
+            }
+            PatchSource::SingleCrease(patch) => {
+                let array = &mut self.arrays[ArrayKind::SingleCrease as usize];
+                array.cvs.extend(patch.cvs.iter().map(|&cv| shift(cv)));
+                array.creases.push((patch.sharpness, patch.edge));
+                ArrayKind::SingleCrease
+            }
+            PatchSource::Gregory(points) => {
+                let range = self.local_points.push(&points, &map);
+                self.arrays[ArrayKind::Gregory as usize]
+                    .end_caps
+                    .push(range);
+                ArrayKind::Gregory
+            }
+            PatchSource::GregoryTriangle(points) => {
+                let range = self.local_points.push(&points, &map);
+                self.arrays[ArrayKind::GregoryTriangle as usize]
+                    .end_caps
+                    .push(range);
+                ArrayKind::GregoryTriangle
+            }
+        };
+        let array = &mut self.arrays[kind as usize];
+        array.len += 1;
+        (kind, array.len - 1)
+    }
+
+    /// Lay the arrays out one after another, in [`ArrayKind`] order, with
+    /// exactly the capacity they need. Also returns the index of the first
+    /// patch of each kind.
+    fn finish(self) -> (PatchArrays, [usize; 7]) {
+        let Self {
+            arrays: builders,
+            mut local_points,
+        } = self;
+        let total_of = |f: fn(&ArrayBuilder) -> usize| builders.iter().map(f).sum::<usize>();
+        let mut arrays = Vec::new();
+        let mut cvs = Vec::with_capacity(total_of(|b| b.cvs.len()));
+        let mut creases = Vec::with_capacity(total_of(|b| b.creases.len()));
+        let mut end_caps = Vec::with_capacity(total_of(|b| b.end_caps.len()));
+        let mut starts = [0usize; 7];
+        let mut start = 0;
+        for (kind, builder) in ArrayKind::ALL.into_iter().zip(builders) {
+            starts[kind as usize] = start;
+            if builder.len == 0 {
+                continue;
+            }
+            arrays.push(PatchArray {
+                kind,
+                start,
+                first_cv: cvs.len(),
+                first_aux: match kind {
+                    ArrayKind::SingleCrease => creases.len(),
+                    ArrayKind::Gregory | ArrayKind::GregoryTriangle => end_caps.len(),
+                    _ => 0,
+                },
+            });
+            start += builder.len;
+            cvs.extend(builder.cvs);
+            creases.extend(builder.creases);
+            end_caps.extend(builder.end_caps);
+        }
+        local_points.shrink_to_fit();
+        let patches = PatchArrays {
+            arrays,
+            cvs,
+            creases,
+            end_caps,
+            local_points,
+        };
+        (patches, starts)
+    }
 }
 
 /// Are `a` and `b` the same parameterization, bit for bit?
@@ -1237,20 +1809,6 @@ fn compute_patch_param(
 // ----------------------------------------------------------------------
 //  Regular-patch classification and control-vertex gathering
 // ----------------------------------------------------------------------
-
-fn quad_cvs(level: &Level, face: usize) -> [Index; 4] {
-    let fv = level.face_vertices(face);
-    let mut cvs = [INDEX_INVALID; 4];
-    cvs.copy_from_slice(fv);
-    cvs
-}
-
-fn tri_cvs(level: &Level, face: usize) -> [Index; 3] {
-    let fv = level.face_vertices(face);
-    let mut cvs = [INDEX_INVALID; 3];
-    cvs.copy_from_slice(fv);
-    cvs
-}
 
 /// Is corner `corner` of `face` regular for the purpose of B-spline patch
 /// extraction (`PatchBuilder::IsPatchRegular`, one corner)?

@@ -22,7 +22,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 |--------|------------------|----------|
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform or sparse quad/tri refinement |
-| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, `LimitStencilTable` / `LimitStencilTableFactory`, and `PatchTable` / `PatchMap` / `PatchParam` / `PtexIndices` |
+| `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, `LimitStencilTable` / `LimitStencilTableFactory`, and `PatchTable` / `PatchTableFactory` / `PatchTableOptions` / `PatchMap` / `PatchParam` / `PtexIndices`, with face-varying patches |
 
 ## Installation
 
@@ -163,6 +163,16 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   carries the triangle's parametric sub-domain (including the inverted
   central children) and `PatchMap` locates triangles by ptex face and
   `(u, v)`
+- **Face-varying patches** (`PatchTableOptions::generate_fvar_tables`,
+  OpenSubdiv's `generateFVarTables`): per channel, one patch for each
+  vertex patch, over the same `(ptex face, u, v)` domain, evaluated with
+  `PatchTable::evaluate_basis_face_varying`. Each is built from the
+  channel's own topology at the patch's level, so seams and the channel's
+  `FVarLinearInterpolation` hold: linear patches for `All` (or for every
+  channel under `generate_fvar_legacy_linear_patches`, on by default as in
+  OpenSubdiv), B-spline or box-spline patches where the channel is regular,
+  and Gregory end caps elsewhere. `AdaptiveOptions::consider_fvar_channels`
+  isolates face-varying features as adaptive refinement isolates vertex ones
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -185,6 +195,17 @@ encoding the channel's linear-interpolation rule as sharpness. One
 approximation is documented in `far::fvar`: `CornersPlus2` implements
 junction and dart sharpening but not OpenSubdiv's additional concave-corner
 analysis.
+
+Face-varying patches reuse that representation: a channel's patch for a
+face is the patch its value mesh gets at the vertex patch's level, so it
+shares the vertex patch's `PatchParam` and is classified by the same rules
+(B-spline, single-crease, Gregory or linear) as vertex patches are. As in
+OpenSubdiv, a face patched where its vertex topology is regular but its
+channel's is not gets a face-varying Gregory end cap at that level, unless
+`AdaptiveOptions::consider_fvar_channels` isolates it; the test suite checks
+that face-varying patches interpolate the channel's limit at face corners,
+and that adaptive refinement considering the channels evaluates the same
+face-varying surface as uniform refinement.
 
 Patch tables extract exact bicubic B-spline patches wherever the limit
 surface is polynomial; boundary, crease and corner patches are realized by

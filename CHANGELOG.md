@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Face-varying patches
+  ([#23](https://github.com/doubleailes/OpenSubdiv-rs/issues/23)). A
+  face-varying channel, such as a seamed UV chart, can now be evaluated at
+  any `(ptex face, u, v)`, at the same location as the vertex patch.
+  `PatchTableFactory::create_with_options` takes the new
+  `PatchTableOptions` (OpenSubdiv's `PatchTableFactory::Options`):
+  `generate_fvar_tables`, `fvar_channels` (`numFVarChannels` /
+  `fvarChannelIndices`) and `generate_fvar_legacy_linear_patches`, which is
+  on by default as in OpenSubdiv. `create` keeps building vertex patches
+  only. For each selected channel the table holds one patch per vertex
+  patch, with the same index and `PatchParam`, so `PatchMap::find_patch`
+  serves both. New queries: `num_fvar_channels`, `fvar_refiner_channel`,
+  `fvar_channel_linear_interpolation`, `num_fvar_values`,
+  `fvar_patch_type`, `fvar_patch_values`, `fvar_patch_param`,
+  `evaluate_basis_face_varying` and `evaluate_face_varying`. A channel's
+  patch comes from its own value mesh at the patch's level, so seams and its
+  `FVarLinearInterpolation` hold. It is linear (quads, or triangles for
+  Loop) for `All` and under legacy linear patches. Otherwise it is a
+  B-spline, single-crease or box-spline patch where the channel is regular
+  around the face, and a Gregory end cap where it is not. Its control values
+  are the channel's values at every level, base level first.
+  `PrimvarRefiner::interpolate_face_varying_all` produces the refined
+  levels. A channel costs its control values and no more when one patch
+  type covers it: 64 B per regular patch, 16 B per linear one.
+
+- `AdaptiveOptions::consider_fvar_channels` (OpenSubdiv's
+  `considerFVarChannels`, off by default). With it, adaptive refinement also
+  isolates faces where a non-linear face-varying channel is irregular (seam
+  junctions, darts, irregular seam corners), even where the vertex topology
+  is regular. Without it, such faces get face-varying Gregory end caps at
+  the level where their vertex patch lies.
+
+- `TopologyError::FVarChannelOutOfRange`, returned when
+  `PatchTableOptions::fvar_channels` names a channel the refiner does not
+  have.
+
 ### Changed
 
 - `PatchTable` stores its patches as OpenSubdiv's patch arrays do

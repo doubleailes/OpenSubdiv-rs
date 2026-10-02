@@ -245,6 +245,13 @@ impl FVarChannel {
         }
     }
 
+    /// The caller's value index of each base value-mesh vertex, when some
+    /// index is reused at several geometric vertices (see
+    /// [`split_reused_values`]); `None` when the two coincide.
+    pub(super) fn base_value_sources(&self) -> Option<&[Index]> {
+        self.base_value_sources.as_deref()
+    }
+
     pub(super) fn refinement(&self, level: usize) -> &Refinement {
         &self.refinements[level - 1]
     }
