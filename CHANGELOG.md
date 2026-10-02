@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PatchTable` stores its patches as OpenSubdiv's patch arrays do
+  ([#22](https://github.com/doubleailes/OpenSubdiv-rs/issues/22)), so
+  regular patches take about 20% less memory than after #21, and about
+  half what they took in 0.3.0. Each patch type has its own contiguous
+  range, with its control vertices in one flat buffer, instead of every
+  patch carrying an enum as large as its largest variant (a 4-index quad
+  paid for 16 indices). `PatchParam` is packed into 8 bytes, and the
+  single-crease sharpness lives in a side array used only by single-crease
+  patches. `PtexIndices` also drops its spare capacity. On a 200×200 quad
+  grid at isolation 1–3, the patch table shrinks from 4.5 MiB (118 B per
+  patch) to 3.6 MiB (94 B per patch; 179 B in 0.3.0). Of those 94 B, 76 B
+  are the patch itself (16 indices, its parameterization and its face) and
+  18 B are per-base-face maps. Every query (`patch_type`, `patch_param`,
+  `patch_face`, `patch_vertices`, `single_crease_sharpness`,
+  `evaluate_basis`, `PatchMap::find_patch`) and every limit stencil returns
+  bit-identical results. Patch *numbering* changes, though: indices are
+  grouped by type (regular, then single-crease, Gregory, quads, Loop,
+  Gregory triangles and triangles), so code that assumed patch `i` covers
+  base face `i` should look the patch up with `PatchMap::find_patch` or
+  check `patch_face`.
+
+- `PatchTableFactory::create` (and `LimitStencilTableFactory::create` when
+  it builds a patch table) now returns the new
+  `TopologyError::PatchDepthTooDeep` for patches deeper than
+  `PatchParam::MAX_DEPTH` (12) below their ptex face. Only uniform
+  refinement past level 12 (13 for non-quad base faces) reaches it.
+  Adaptive refinement stops at 10, and OpenSubdiv's own patch depth limit
+  is 10.
+
 - Gregory and Gregory-triangle end caps take about 60% less memory
   ([#21](https://github.com/doubleailes/OpenSubdiv-rs/issues/21)). Their
   derived points used to be one heap-allocated stencil per point (20 or 18

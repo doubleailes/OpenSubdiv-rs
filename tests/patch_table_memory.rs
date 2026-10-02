@@ -1,0 +1,79 @@
+//! Patch-table memory: the live heap bytes a `PatchTable` holds per patch,
+//! measured by a counting global allocator (this test binary only).
+
+use opensubdiv_rs::far::{
+    AdaptiveOptions, PatchTableFactory, PatchType, TopologyDescriptor, TopologyRefinerFactory,
+};
+use opensubdiv_rs::sdc;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Counting;
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        LIVE.fetch_add(new_size, Ordering::Relaxed);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// A regular quad cage keeps its patch table near OpenSubdiv's layout: 16
+/// control-vertex indices, an 8-byte parameterization and the face per
+/// regular patch, plus the per-level face maps (179 bytes per patch in
+/// 0.3.0).
+#[test]
+fn regular_patches_cost_under_100_bytes() {
+    let n = 200u32;
+    let mut verts_per_face = Vec::new();
+    let mut face_verts = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            let v = j * (n + 1) + i;
+            verts_per_face.push(4);
+            face_verts.extend_from_slice(&[v, v + 1, v + n + 2, v + n + 1]);
+        }
+    }
+    let num_verts = ((n + 1) * (n + 1)) as usize;
+    for isolation in 1..=3 {
+        let descriptor = TopologyDescriptor::new(num_verts, &verts_per_face, &face_verts);
+        let mut refiner = TopologyRefinerFactory::create(
+            descriptor,
+            sdc::SchemeType::Catmark,
+            sdc::Options::default(),
+        )
+        .unwrap();
+        refiner.refine_adaptive(AdaptiveOptions::new(isolation));
+
+        let before = LIVE.load(Ordering::Relaxed);
+        let table = PatchTableFactory::create(&refiner).unwrap();
+        let bytes = LIVE.load(Ordering::Relaxed) - before;
+
+        let patches = table.num_patches();
+        let regular = (0..patches)
+            .filter(|&p| table.patch_type(p) == PatchType::Regular)
+            .count();
+        assert!(
+            regular * 100 >= patches * 99,
+            "{regular} of {patches} regular"
+        );
+        let per_patch = bytes as f64 / patches as f64;
+        println!("isolation {isolation}: {patches} patches, {bytes} bytes, {per_patch:.1} B/patch");
+        assert!(per_patch < 100.0, "{per_patch:.1} bytes per patch");
+    }
+}

@@ -75,6 +75,15 @@ pub enum TopologyError {
     /// Building patches for a mesh with non-quad faces requires at least one
     /// level of refinement.
     PatchesRequireRefinement,
+    /// A patch would lie deeper below its ptex face than a patch table
+    /// stores (`PatchParam::MAX_DEPTH`): uniform refinement past that
+    /// depth cannot be patched.
+    PatchDepthTooDeep {
+        /// The depth of the offending patch.
+        depth: usize,
+        /// The deepest depth a patch table stores.
+        max: usize,
+    },
     /// A limit stencil was requested on a ptex face the patch table does
     /// not have.
     PtexFaceOutOfRange {
@@ -148,6 +157,12 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "patches for meshes with non-quad faces require at least one refinement level"
+                )
+            }
+            TopologyError::PatchDepthTooDeep { depth, max } => {
+                write!(
+                    f,
+                    "a patch at depth {depth} is deeper than patch tables support ({max})"
                 )
             }
             TopologyError::PtexFaceOutOfRange {
