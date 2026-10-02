@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Selected faces
+  ([#29](https://github.com/doubleailes/OpenSubdiv-rs/issues/29)), as
+  OpenSubdiv's `RefineAdaptive` and `PatchTableFactory::Create` with
+  `selectedFaces`. `TopologyRefiner::refine_adaptive_selected(options,
+  &faces)` isolates features only around the given base faces, and
+  `PatchTableFactory::create_with_options_selected(&refiner, &options,
+  &faces)` builds patches only for those faces and their descendants,
+  face-varying patches included. `PatchMap::find_patch` returns `None` on
+  the faces left out. Used together, they cost what the selected faces
+  need instead of what the whole cage needs. The patches of the selected
+  faces are the ones a full refinement and a full table give them: same
+  types, `PatchParam`s and sharpness, and bit-identical evaluation. Unlike
+  OpenSubdiv, an empty selection selects no face, not every face.
+
+- `TopologyError::SelectedFaceOutOfRange`, returned when a selected face
+  passed to `create_with_options_selected` is not a base face.
+
+### Changed
+
+- `PatchTableFactory` returns `TopologyError::PatchesRequireRefinement` for
+  each non-quad face it has to patch but which was not refined (such as one
+  left out of `refine_adaptive_selected`), instead of checking only that
+  the refiner has a level above the base. An unrefined mesh whose only
+  non-quad faces are holes can now be patched.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

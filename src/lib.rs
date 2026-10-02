@@ -85,7 +85,9 @@
 //! feature-adaptive refinement
 //! ([`far::TopologyRefiner::refine_adaptive`], for both schemes, with
 //! sparse levels, mixed-depth patches and optional single-crease patches
-//! for semi-sharp creases) are supported. Not yet ported: the `Osd` GPU
+//! for semi-sharp creases, restricted to selected faces if wanted with
+//! [`far::TopologyRefiner::refine_adaptive_selected`] and
+//! [`far::PatchTableFactory::create_with_options_selected`]) are supported. Not yet ported: the `Osd` GPU
 //! layer. See the project README for the roadmap.
 
 #![forbid(unsafe_code)]

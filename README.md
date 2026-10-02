@@ -114,6 +114,13 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   `useSingleCreasePatch`), regular faces along a semi-sharp crease are not
   isolated at all: each becomes one exact **single-crease patch** carrying
   the crease's sharpness
+- **Selected faces** (`refine_adaptive_selected` and
+  `PatchTableFactory::create_with_options_selected`, OpenSubdiv's
+  `selectedFaces`): isolate features and build patches around chosen base
+  faces only, so a renderer that needs the limit surface of a few faces of
+  a large cage pays for those faces alone. Their patches are the ones a
+  full refinement and a full table give them, evaluating bit-identically;
+  `PatchMap` finds no patch elsewhere
 - **Semi-sharp creasing**: edge creases and vertex corners with fractional
   sharpness, `Uniform` and `Chaikin` crease subdivision, and the transitional
   blending of smooth/crease/corner masks across levels
@@ -206,6 +213,11 @@ channel's is not gets a face-varying Gregory end cap at that level, unless
 that face-varying patches interpolate the channel's limit at face corners,
 and that adaptive refinement considering the channels evaluates the same
 face-varying surface as uniform refinement.
+
+Selected-face refinement and patch tables follow OpenSubdiv's
+`RefineAdaptive` and `PatchTableFactory::Create` with `selectedFaces`, with
+one difference: an empty selection selects no face, where OpenSubdiv's
+empty array means every face.
 
 Patch tables extract exact bicubic B-spline patches wherever the limit
 surface is polynomial; boundary, crease and corner patches are realized by
