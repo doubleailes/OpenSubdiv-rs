@@ -11,6 +11,8 @@ documentation = "https://docs.rs/opensubdiv-rs"
 readme = "README.md"
 keywords = ["subdivision", "graphics", "geometry", "catmull-clark", "loop"]
 categories = ["graphics", "mathematics"]
+# The OpenSubdiv reference data (several MB) is only needed by the tests.
+exclude = ["tests/data/", "tools/"]
 
 [lib]
 name = "opensubdiv_rs"
