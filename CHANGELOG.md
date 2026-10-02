@@ -23,8 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 372 MiB to 622 MiB. The patch table also drops its spare vector
   capacity, so an all-quad 200×200 grid at isolation 2 shrinks from
   6.8 MiB to 4.5 MiB. Every control vertex's basis weights are
-  bit-identical to before. Caps around vertices of extreme valence, whose
-  support exceeds 255 vertices, keep their stencils whole.
+  bit-identical to before. For end-cap patches, though, the order of
+  `PatchBasis::indices` and of `patch_vertices` follows the first nonzero
+  weight of each vertex, so it can change. `patch_vertices` also leaves out
+  any vertex whose weights are all exactly zero. `evaluate` then sums in a
+  different order and can differ in the last bit. Caps around vertices of
+  extreme valence, whose support exceeds 255 vertices, keep their stencils
+  whole.
 
 ## [0.3.0] - 2026-10-01
 
