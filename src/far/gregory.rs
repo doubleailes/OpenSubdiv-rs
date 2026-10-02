@@ -86,9 +86,12 @@ impl SparsePoint {
     }
 }
 
+/// The number of control points of a Gregory patch.
+pub(crate) const NUM_POINTS: usize = 20;
+
 /// The 20 Gregory control points, ordered per corner as
 /// `[P, E+, E-, F+, F-]` (matching OpenSubdiv's Gregory-basis layout).
-pub(crate) type GregoryPoints = [SparsePoint; 20];
+pub(crate) type GregoryPoints = [SparsePoint; NUM_POINTS];
 
 // ----------------------------------------------------------------------
 //  Corner spans
@@ -442,7 +445,7 @@ fn irregular_face_point(level: &Level, near: &Corner, far: &Corner, plus: bool) 
 /// Build the 20 Gregory control-point stencils for `face`
 /// (`GregoryConverter::Convert`), or `None` when a corner neighborhood
 /// contains non-quad faces or lies on an unsharpened boundary.
-pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryPoints>> {
+pub(crate) fn build(level: &Level, face: usize) -> Option<GregoryPoints> {
     let fv = level.face_vertices(face);
     if fv.len() != 4 {
         return None;
@@ -613,7 +616,7 @@ pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryPoints>> {
         points[5 * k + 3] = fp;
         points[5 * k + 4] = fm;
     }
-    Some(Box::new(points))
+    Some(points)
 }
 
 // ----------------------------------------------------------------------

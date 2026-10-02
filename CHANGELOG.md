@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Gregory and Gregory-triangle end caps take about 60% less memory
+  ([#21](https://github.com/doubleailes/OpenSubdiv-rs/issues/21)). Their
+  derived points used to be one heap-allocated stencil per point (20 or 18
+  per patch). They now share one flat local-point stencil table in the
+  `PatchTable`, the role of OpenSubdiv's `LocalPointStencilTable` for
+  `ENDCAP_GREGORY_BASIS`. Each patch lists its support vertices once, and
+  each stencil entry refers to one of them by a one-byte slot. Exactly-zero
+  weights are dropped. On a 200×200 grid of 80 000 triangles under Catmark,
+  the patch table at isolation 1 (240 000 Gregory patches) shrinks from
+  623 MiB (2 721 B per patch) to 250 MiB (1 090 B per patch). At isolation
+  2 it shrinks from 1 066 MiB to 472 MiB, and at isolation 3 from
+  1 372 MiB to 622 MiB. The patch table also drops its spare vector
+  capacity, so an all-quad 200×200 grid at isolation 2 shrinks from
+  6.8 MiB to 4.5 MiB. Every control vertex's basis weights are
+  bit-identical to before. Caps around vertices of extreme valence, whose
+  support exceeds 255 vertices, keep their stencils whole.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

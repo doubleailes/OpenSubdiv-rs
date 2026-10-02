@@ -352,11 +352,14 @@ pub(crate) fn fold_phantom_weights(cvs: &[Index; 12], weights: &mut [f32; 12]) {
 //  Gregory triangles (LoopLimits / GregoryTriConverter)
 // ----------------------------------------------------------------------
 
+/// The number of control points of a Gregory triangle patch.
+pub(crate) const NUM_GREGORY_TRI_POINTS: usize = 18;
+
 /// The 18 Gregory triangle control points: per corner `[P, E+, E-, F+, F-]`
 /// (points `5k..5k+5`), then the mid-edge points `M0, M1, M2` of edges
 /// `0, 1, 2` (points `15..18`), matching OpenSubdiv's `GREGORY_TRIANGLE`
 /// layout.
-pub(crate) type GregoryTriPoints = [SparsePoint; 18];
+pub(crate) type GregoryTriPoints = [SparsePoint; NUM_GREGORY_TRI_POINTS];
 
 /// Loop subdivision's `beta(n)` (`Sdc::Scheme<SCHEME_LOOP>`).
 fn loop_beta(valence: usize) -> f32 {
@@ -549,7 +552,7 @@ fn face_point(
 /// Build the 18 Gregory triangle control-point stencils for `face`
 /// (`GregoryTriConverter::Convert`), or `None` when a corner neighborhood
 /// contains non-triangular faces or lies on an unsharpened boundary.
-pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryTriPoints>> {
+pub(crate) fn build(level: &Level, face: usize) -> Option<GregoryTriPoints> {
     let fv = level.face_vertices(face);
     if fv.len() != 3 {
         return None;
@@ -720,7 +723,7 @@ pub(crate) fn build(level: &Level, face: usize) -> Option<Box<GregoryTriPoints>>
         points[5 * k + 4] = fm;
     }
     points[15..18].clone_from_slice(&mids);
-    Some(Box::new(points))
+    Some(points)
 }
 
 // ----------------------------------------------------------------------
