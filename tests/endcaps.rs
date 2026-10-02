@@ -208,7 +208,11 @@ fn assert_caps_are_affine(surface: &Surface) {
 ///           centre
 /// ```
 fn fan() -> (Vec<usize>, Vec<u32>, Vec<P3>) {
-    let n = 5u32;
+    fan_of(5)
+}
+
+/// [`fan`] with `n` quads around the centre.
+fn fan_of(n: u32) -> (Vec<usize>, Vec<u32>, Vec<P3>) {
     let mut verts_per_face = Vec::new();
     let mut face_verts = Vec::new();
     for i in 0..n {
@@ -724,4 +728,32 @@ fn bow_tie_vertex_is_capped_consistently() {
         }
     }
     assert_eq!(at_shared, 6);
+}
+
+#[test]
+fn high_valence_caps_keep_their_whole_stencils() {
+    // A pole of valence 300: the caps around it depend on more control
+    // values than the patch table's compact end-cap storage addresses (255
+    // per patch), so they are stored whole. They must evaluate like any
+    // other cap: affine, and meeting at the pole's limit point.
+    let n = 300;
+    let (verts_per_face, face_verts, positions) = fan_of(n);
+    let descriptor = TopologyDescriptor::new(positions.len(), &verts_per_face, &face_verts);
+    let surface = Surface::adaptive(descriptor, sdc::Options::default(), 1, &positions);
+    let table = &surface.table;
+    assert_eq!(count(table, PatchType::Quads), 0);
+    assert_caps_are_affine(&surface);
+
+    let map = PatchMap::new(table);
+    let pole: Vec<P3> = (0..n as usize)
+        .map(|ptex| {
+            let patch = map.find_patch(ptex, 0.0, 0.0).unwrap();
+            assert_eq!(table.patch_type(patch), PatchType::GregoryBasis);
+            assert!(table.patch_vertices(patch).len() > 255);
+            surface.evaluate(patch, 0.0, 0.0)
+        })
+        .collect();
+    for p in &pole {
+        assert_close(*p, pole[0], 1e-5);
+    }
 }

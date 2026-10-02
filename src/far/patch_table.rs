@@ -69,8 +69,8 @@
 //! [`PrimvarRefiner::interpolate`](super::PrimvarRefiner::interpolate)
 //! output.
 
-use super::gregory::{self, corner_span, is_edge_singular, vertex_rule, GregoryPoints};
-use super::loop_patch::{self, GregoryTriPoints};
+use super::gregory::{self, corner_span, is_edge_singular, vertex_rule, SparsePoint};
+use super::loop_patch::{self, NUM_GREGORY_TRI_POINTS};
 use super::primvar_refiner::Primvar;
 use super::ptex::PtexIndices;
 use super::topology_refiner::TopologyRefiner;
@@ -191,20 +191,180 @@ enum PatchKind {
         edge: u8,
         sharpness: f32,
     },
-    /// The 20 Gregory control points as stencils on the last level's
-    /// vertices.
-    Gregory(Box<GregoryPoints>),
+    /// The 20 Gregory control points, stored in the table's
+    /// [`LocalPoints`].
+    Gregory(LocalPointRange),
     /// The face's 4 corner vertices.
     Quads([Index; 4]),
     /// The 12 control vertices of a box-spline triangle (laid out as in
     /// [`loop_patch::gather_regular_patch`]), with `INDEX_INVALID` marking
     /// phantom slots beyond boundaries and infinitely sharp creases.
     Loop([Index; 12]),
-    /// The 18 Gregory triangle control points as stencils on the last
-    /// level's vertices.
-    GregoryTriangle(Box<GregoryTriPoints>),
+    /// The 18 Gregory triangle control points, stored in the table's
+    /// [`LocalPoints`].
+    GregoryTriangle(LocalPointRange),
     /// The face's 3 corner vertices.
     Triangles([Index; 3]),
+}
+
+/// Where the derived control points of one end-cap patch lie in
+/// [`LocalPoints`].
+#[derive(Debug, Clone, Copy)]
+enum LocalPointRange {
+    /// Compact storage: the patch's `support_len` support vertices start at
+    /// `support`, its points are consecutive from `first_point` and their
+    /// entries consecutive from `first_entry`.
+    Compact {
+        support: usize,
+        first_point: usize,
+        first_entry: usize,
+        support_len: u8,
+    },
+    /// The stencils of a patch whose support is too large for compact
+    /// storage (only around vertices of extreme valence), kept whole.
+    Wide(usize),
+}
+
+/// The largest patch support [`LocalPoints`] stores compactly: slots and
+/// per-point entry counts are bytes.
+const MAX_COMPACT_SUPPORT: usize = u8::MAX as usize;
+
+/// The derived control points of every end-cap patch (Gregory and Gregory
+/// triangle), as one flat stencil table on the concatenated control values
+/// — the role of OpenSubdiv's local-point stencil table for
+/// `ENDCAP_GREGORY_BASIS`.
+///
+/// Each patch lists its *support* — the distinct control values its points
+/// depend on, in order of first use — once, and each stencil entry refers
+/// to its vertex by a one-byte slot in that list: an end cap costs four
+/// bytes per support vertex, one per point and five per entry, with no
+/// allocation of its own. Point `p` has `sizes[p]` entries, and the entries
+/// of consecutive points are consecutive in `slots` and `weights`.
+#[derive(Debug, Clone, Default)]
+struct LocalPoints {
+    support: Vec<Index>,
+    sizes: Vec<u8>,
+    slots: Vec<u8>,
+    weights: Vec<f32>,
+    /// The stencils of the [`LocalPointRange::Wide`] patches.
+    wide: Vec<Box<[SparsePoint]>>,
+}
+
+impl LocalPoints {
+    /// Append the stencils of one patch's `points`, shifting their vertex
+    /// indices by `offset` into the concatenated control values and
+    /// dropping zero weights. Exact zeros are common (a regular corner
+    /// scales its neighbor's points by `cos(pi / 2) = 0` in the face-point
+    /// blend) and contribute nothing.
+    fn push(&mut self, points: &[SparsePoint], offset: Index) -> LocalPointRange {
+        let support = self.support.len();
+        let first_point = self.sizes.len();
+        let first_entry = self.slots.len();
+        'compact: {
+            for point in points {
+                let start = self.slots.len();
+                for &(cv, w) in point.0.iter().filter(|&&(_, w)| w != 0.0) {
+                    let cv = cv + offset;
+                    let slot = match self.support[support..].iter().position(|&s| s == cv) {
+                        Some(slot) => slot,
+                        None if self.support.len() - support < MAX_COMPACT_SUPPORT => {
+                            self.support.push(cv);
+                            self.support.len() - support - 1
+                        }
+                        None => break 'compact,
+                    };
+                    self.slots.push(slot as u8);
+                    self.weights.push(w);
+                }
+                // A point's entries have distinct vertices (`SparsePoint`
+                // merges them), so their count is at most the support's.
+                self.sizes.push((self.slots.len() - start) as u8);
+            }
+            return LocalPointRange::Compact {
+                support,
+                first_point,
+                first_entry,
+                support_len: (self.support.len() - support) as u8,
+            };
+        }
+        self.support.truncate(support);
+        self.sizes.truncate(first_point);
+        self.slots.truncate(first_entry);
+        self.weights.truncate(first_entry);
+        let nonzero = |point: &SparsePoint| {
+            let entries = point.0.iter().filter(|&&(_, w)| w != 0.0);
+            SparsePoint(entries.map(|&(cv, w)| (cv + offset, w)).collect())
+        };
+        self.wide.push(points.iter().map(nonzero).collect());
+        LocalPointRange::Wide(self.wide.len() - 1)
+    }
+
+    /// Call `f(point, control value, weight)` for every stencil entry of
+    /// the `count` points of `range`, in order.
+    fn for_each_entry(
+        &self,
+        range: LocalPointRange,
+        count: usize,
+        mut f: impl FnMut(usize, Index, f32),
+    ) {
+        match range {
+            LocalPointRange::Compact {
+                support,
+                first_point,
+                first_entry,
+                ..
+            } => {
+                let support = &self.support[support..];
+                let mut entry = first_entry;
+                let sizes = &self.sizes[first_point..first_point + count];
+                for (point, &size) in sizes.iter().enumerate() {
+                    let entries = entry..entry + size as usize;
+                    for (&slot, &w) in self.slots[entries.clone()]
+                        .iter()
+                        .zip(&self.weights[entries])
+                    {
+                        f(point, support[slot as usize], w);
+                    }
+                    entry += size as usize;
+                }
+            }
+            LocalPointRange::Wide(patch) => {
+                for (point, stencil) in self.wide[patch].iter().enumerate() {
+                    for &(cv, w) in &stencil.0 {
+                        f(point, cv, w);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The distinct control values the points of `range` depend on, in
+    /// order of first use.
+    fn support(&self, range: LocalPointRange, count: usize) -> Vec<Index> {
+        if let LocalPointRange::Compact {
+            support,
+            support_len,
+            ..
+        } = range
+        {
+            return self.support[support..support + support_len as usize].to_vec();
+        }
+        let mut cvs: Vec<Index> = Vec::new();
+        self.for_each_entry(range, count, |_, cv, _| {
+            if !cvs.contains(&cv) {
+                cvs.push(cv);
+            }
+        });
+        cvs
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.support.shrink_to_fit();
+        self.sizes.shrink_to_fit();
+        self.slots.shrink_to_fit();
+        self.weights.shrink_to_fit();
+        self.wide.shrink_to_fit();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +388,8 @@ struct Patch {
 #[derive(Debug, Clone)]
 pub struct PatchTable {
     patches: Vec<Patch>,
+    /// The derived control points of the end-cap patches.
+    local_points: LocalPoints,
     /// Per level: patch index of each face (`INDEX_INVALID` where no patch
     /// was emitted — holes, refined faces, or unsupported support faces).
     face_to_patch: Vec<Vec<Index>>,
@@ -278,17 +440,6 @@ impl PatchTable {
     /// slots of regular patches are omitted; for Gregory patches this is
     /// the union of the vertices supporting its derived points.
     pub fn patch_vertices(&self, patch: usize) -> Vec<Index> {
-        let stencil_support = |points: &[gregory::SparsePoint]| {
-            let mut cvs: Vec<Index> = Vec::new();
-            for point in points {
-                for &(cv, _) in &point.0 {
-                    if !cvs.contains(&cv) {
-                        cvs.push(cv);
-                    }
-                }
-            }
-            cvs
-        };
         match &self.patches[patch].kind {
             PatchKind::Regular(cvs) => cvs
                 .iter()
@@ -303,8 +454,10 @@ impl PatchTable {
             PatchKind::SingleCrease { cvs, .. } => cvs.to_vec(),
             PatchKind::Quads(cvs) => cvs.to_vec(),
             PatchKind::Triangles(cvs) => cvs.to_vec(),
-            PatchKind::Gregory(points) => stencil_support(&points[..]),
-            PatchKind::GregoryTriangle(points) => stencil_support(&points[..]),
+            PatchKind::Gregory(range) => self.local_points.support(*range, gregory::NUM_POINTS),
+            PatchKind::GregoryTriangle(range) => {
+                self.local_points.support(*range, NUM_GREGORY_TRI_POINTS)
+            }
         }
     }
 
@@ -423,13 +576,12 @@ impl PatchTable {
                     push(cv, w[slot], ws[slot], wt[slot]);
                 }
             }
-            PatchKind::Gregory(points) => {
+            PatchKind::Gregory(range) => {
                 let (w20, ws20, wt20) = gregory::evaluate_basis(s, t);
-                for (point, stencil) in points.iter().enumerate() {
-                    for &(cv, sw) in &stencil.0 {
+                self.local_points
+                    .for_each_entry(*range, gregory::NUM_POINTS, |point, cv, sw| {
                         push(cv, w20[point] * sw, ws20[point] * sw, wt20[point] * sw);
-                    }
-                }
+                    });
             }
             PatchKind::Loop(cvs) => {
                 let (mut w, mut ws, mut wt) = loop_patch::box_spline_basis(s, t);
@@ -444,13 +596,15 @@ impl PatchTable {
                     push(cv, w[slot], ws[slot], wt[slot]);
                 }
             }
-            PatchKind::GregoryTriangle(points) => {
+            PatchKind::GregoryTriangle(range) => {
                 let (w18, ws18, wt18) = loop_patch::evaluate_basis(s, t);
-                for (point, stencil) in points.iter().enumerate() {
-                    for &(cv, sw) in &stencil.0 {
+                self.local_points.for_each_entry(
+                    *range,
+                    NUM_GREGORY_TRI_POINTS,
+                    |point, cv, sw| {
                         push(cv, w18[point] * sw, ws18[point] * sw, wt18[point] * sw);
-                    }
-                }
+                    },
+                );
             }
             PatchKind::Triangles(cvs) => {
                 let w = [1.0 - s - t, s, t];
@@ -604,6 +758,7 @@ impl PatchTableFactory {
         let single_crease = refiner.uses_single_crease_patch();
 
         let mut patches = Vec::new();
+        let mut local_points = LocalPoints::default();
         let mut face_to_patch: Vec<Vec<Index>> = (0..=max_level)
             .map(|l| vec![INDEX_INVALID; refiner.level(l).num_faces()])
             .collect();
@@ -637,16 +792,11 @@ impl PatchTableFactory {
                                 edge: patch.edge,
                                 sharpness: patch.sharpness,
                             }
-                        } else if let Some(mut points) = gregory::build(inner, face) {
+                        } else if let Some(points) = gregory::build(inner, face) {
                             // Irregular neighborhood (extraordinary, boundary,
                             // crease, sharp, dart or non-manifold corners):
                             // Gregory end cap.
-                            for point in points.iter_mut() {
-                                for (cv, _) in point.0.iter_mut() {
-                                    *cv += offset;
-                                }
-                            }
-                            PatchKind::Gregory(points)
+                            PatchKind::Gregory(local_points.push(&points, offset))
                         } else {
                             // Unsharpened boundary or non-quad ring: bilinear
                             // fallback.
@@ -659,13 +809,8 @@ impl PatchTableFactory {
                                 *cv += offset;
                             }
                             PatchKind::Loop(cvs)
-                        } else if let Some(mut points) = loop_patch::build(inner, face) {
-                            for point in points.iter_mut() {
-                                for (cv, _) in point.0.iter_mut() {
-                                    *cv += offset;
-                                }
-                            }
-                            PatchKind::GregoryTriangle(points)
+                        } else if let Some(points) = loop_patch::build(inner, face) {
+                            PatchKind::GregoryTriangle(local_points.push(&points, offset))
                         } else {
                             // Unsharpened boundary: linear fallback.
                             PatchKind::Triangles(tri_cvs(inner, face).map(|cv| cv + offset))
@@ -685,8 +830,12 @@ impl PatchTableFactory {
             }
         }
 
+        // The tables only grow while building; drop their spare capacity.
+        patches.shrink_to_fit();
+        local_points.shrink_to_fit();
         Ok(PatchTable {
             patches,
+            local_points,
             face_to_patch,
             ptex,
             max_level,
