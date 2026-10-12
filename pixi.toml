@@ -1,0 +1,13 @@
+[workspace]
+authors = ["Philippe Llerena <philippe.llerena@gmail.com>"]
+channels = ["https://conda.anaconda.org/anderslanglands", "conda-forge"]
+name = "OpenSubdiv-rs"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+opensubdiv = ">=3.7.0,<4"
+cxx-compiler = "*"
+python = "3.13.*"
