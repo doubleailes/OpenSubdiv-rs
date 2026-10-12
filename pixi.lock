@@ -1,0 +1,115 @@
+version: 7
+platforms:
+- name: linux-64
+  virtual-packages:
+  - __unix=0=0
+  - __linux=4.18
+  - __glibc=2.28
+  - __archspec=0=x86_64
+environments:
+  default:
+    channels:
+    - url: https://conda.anaconda.org/anderslanglands/
+    - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+      - conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-3.7.0-h27b720c_1.conda
+      - conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-dev-3.7.0-h1c7b4c8_1.conda
+      - conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-lib-3.7.0-hb0f4dca_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
+packages:
+- conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-3.7.0-h27b720c_1.conda
+  sha256: 87e9918dd639d0ad5fb66602d3007ee6c1652db298a0448fff2154e55a412dfa
+  md5: ca62517f54871f4b1b08331c47e81a12
+  depends:
+  - opensubdiv-lib ==3.7.0 hb0f4dca_1
+  - opensubdiv-dev ==3.7.0 h1c7b4c8_1
+  constrains:
+  - opensubdiv-gpu <0a0
+  - opensubdiv-cuda <0a0
+  license: LicenseRef-TOSL-1.0
+  size: 12578
+  timestamp: 1782361886018
+- conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-dev-3.7.0-h1c7b4c8_1.conda
+  sha256: a07deb3483eb6da462714b5e3df58895a98204076581392321fa370ef92e28eb
+  md5: bd204014b7b9bfb39ae0967fc55eb40f
+  depends:
+  - opensubdiv-lib ==3.7.0 hb0f4dca_1
+  - libstdcxx >=15
+  - libgcc >=15
+  constrains:
+  - opensubdiv-gpu-dev <0a0
+  - opensubdiv-cuda-dev <0a0
+  license: LicenseRef-TOSL-1.0
+  size: 608487
+  timestamp: 1782361886018
+- conda: https://conda.anaconda.org/anderslanglands/linux-64/opensubdiv-lib-3.7.0-hb0f4dca_1.conda
+  sha256: 1c29beafd96a01afed9f4c11b65616024640a39a6941d7aca1f4b1033224c163
+  md5: f12b63549610cb57810556c5b2f10f7f
+  depends:
+  - libstdcxx >=15
+  - libgcc >=15
+  constrains:
+  - opensubdiv-gpu-lib <0a0
+  - opensubdiv-cuda-lib <0a0
+  license: LicenseRef-TOSL-1.0
+  size: 427098
+  timestamp: 1782361886018
+- conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+  build_number: 20
+  sha256: 1dd3fffd892081df9726d7eb7e0dea6198962ba775bd88842135a4ddb4deb3c9
+  md5: a9f577daf3de00bca7c3c76c0ecbd1de
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgomp >=7.5.0
+  constrains:
+  - openmp_impl <0.0a0
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports:
+    strong:
+    - _openmp_mutex >=4.5
+  size: 28948
+  timestamp: 1770939786096
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+  sha256: e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea
+  md5: 735629b400b70eeab21a2ba8f5b1c2ce
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - _openmp_mutex >=4.5
+  constrains:
+  - libgcc-ng ==16.2.0=*_7
+  - libgomp 16.2.0 he0feb66_7
+  license: GPL-3.0-only WITH GCC-exception-3.1
+  license_family: GPL
+  run_exports: {}
+  size: 1058444
+  timestamp: 1790303109576
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+  sha256: 92a0bb350c7be6a4eedcb4e111c60aefd176018e6b1c009a6e025dbe9bbcd758
+  md5: d904c7ddd95e026254b4b80808ee9e12
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  license: GPL-3.0-only WITH GCC-exception-3.1
+  license_family: GPL
+  run_exports:
+    strong:
+    - _openmp_mutex >=4.5
+  size: 640566
+  timestamp: 1790303046034
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
+  sha256: fa7018298629fc429971fffd6ecba3d27a7b02e4e890d6a93ea01ffebe8cb745
+  md5: 9b6707e0caca917fa6ea9ee473f37a5d
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc 16.2.0 ha9f2e26_7
+  constrains:
+  - libstdcxx-ng ==16.2.0=*_7
+  license: GPL-3.0-only WITH GCC-exception-3.1
+  license_family: GPL
+  run_exports: {}
+  size: 6615436
+  timestamp: 1790303132935
