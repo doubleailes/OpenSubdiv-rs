@@ -195,6 +195,13 @@ parent faces, then edges, then vertices); the *numbering* of edges — and hence
 of edge child-vertices — can differ from OpenSubdiv's, as it depends on
 internal traversal order.
 
+The reference version is **OpenSubdiv 3.7.0**. The test suite compares
+Chaikin creasing and face-varying `CornersPlus2` results with values computed
+by that release; `pixi.toml` pins it (`opensubdiv >=3.7.0,<4`) so the
+reference data can be regenerated. The other tests check against the classic
+Catmull-Clark and Loop rules and against internal consistency (limit stencils,
+linear precision, adaptive vs. uniform).
+
 Face-varying channels are represented as OpenSubdiv represents them
 conceptually: a channel's values form a mesh of their own in which UV seams
 are boundaries, refined with the same machinery as the geometry after
