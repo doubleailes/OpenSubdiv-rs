@@ -12,8 +12,13 @@ readme = "README.md"
 keywords = ["subdivision", "wgpu", "gpu", "catmull-clark", "loop"]
 categories = ["graphics", "rendering"]
 
+# Not published until opensubdiv-rs releases the `osd` API (0.6): a version
+# requirement on the released 0.5 would resolve to a crate without it.
+# Publishing means requiring that release here and removing this line.
+publish = false
+
 [dependencies]
-opensubdiv-rs = { path = "..", version = "0.5" }
+opensubdiv-rs = { path = ".." }
 wgpu = "30"
 
 [dev-dependencies]

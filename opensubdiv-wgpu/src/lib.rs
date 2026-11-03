@@ -29,7 +29,13 @@
 //! OpenSubdiv's `BufferDescriptor`, so positions, normals and other data
 //! may be interleaved in one vertex buffer. Buffers the kernels read or
 //! write need [`wgpu::BufferUsages::STORAGE`]; a kernel cannot read and
-//! write the same buffer.
+//! write the same buffer. A kernel binds only the part of a primvar buffer
+//! its elements reach, and every table whole, so each must fit the device's
+//! `max_storage_buffer_binding_size` (128 MiB by default; request a higher
+//! limit, or split a larger mesh or evaluation); the functions panic with
+//! the offending buffer's name otherwise. The patch kernel uses 8 storage
+//! buffers, WebGPU's default `max_storage_buffers_per_shader_stage`: the
+//! "downlevel" limits of WebGL2 and some OpenGL ES devices (4) are too few.
 //!
 //! ```no_run
 //! use opensubdiv_rs::far::{
@@ -138,8 +144,10 @@ impl<'a> PrimvarBuffer<'a> {
         }
     }
 
-    /// Panic unless the buffer holds `count` elements.
-    fn check(&self, count: u32, what: &str) {
+    /// The bytes from the start of the buffer that `count` elements reach
+    /// (at least 4, the smallest binding); panics unless the buffer holds
+    /// them.
+    fn binding_size(&self, count: u32, what: &str) -> u64 {
         assert!(
             self.stride >= self.length,
             "{what}: stride {} is less than length {}",
@@ -147,7 +155,7 @@ impl<'a> PrimvarBuffer<'a> {
             self.length
         );
         if count == 0 {
-            return;
+            return 4;
         }
         let floats = u64::from(self.offset)
             + u64::from(count - 1) * u64::from(self.stride)
@@ -158,6 +166,7 @@ impl<'a> PrimvarBuffer<'a> {
             floats * 4,
             self.buffer.size()
         );
+        (floats * 4).max(4)
     }
 }
 
@@ -176,6 +185,11 @@ impl StencilTableBuffers {
     /// Upload `table`'s [`offsets`](StencilTable::offsets),
     /// [`indices`](StencilTable::indices) and
     /// [`weights`](StencilTable::weights).
+    ///
+    /// # Panics
+    ///
+    /// Panics when a buffer would exceed the device's
+    /// `max_storage_buffer_binding_size`, as the kernels bind tables whole.
     pub fn new(device: &wgpu::Device, table: &StencilTable) -> Self {
         StencilTableBuffers {
             offsets: storage_buffer(device, "stencil offsets", table.offsets(), 1),
@@ -209,6 +223,11 @@ pub struct LimitStencilTableBuffers {
 
 impl LimitStencilTableBuffers {
     /// Upload `table`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a buffer would exceed the device's
+    /// `max_storage_buffer_binding_size`, as the kernels bind tables whole.
     pub fn new(device: &wgpu::Device, table: &LimitStencilTable) -> Self {
         let points = StencilTableBuffers::new(device, table.point_stencils());
         let with_weights = |label, weights: &[f32]| StencilTableBuffers {
@@ -251,6 +270,11 @@ pub struct PatchTableBuffers {
 
 impl PatchTableBuffers {
     /// Upload `table`'s patch arrays, index buffer and patch parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a buffer would exceed the device's
+    /// `max_storage_buffer_binding_size`, as the kernels bind tables whole.
     pub fn new(device: &wgpu::Device, table: &GpuPatchTable) -> Self {
         PatchTableBuffers {
             arrays: storage_buffer(device, "patch arrays", &table.patch_array_words(), 6),
@@ -282,6 +306,11 @@ pub struct PatchCoordBuffer {
 
 impl PatchCoordBuffer {
     /// Upload `coords`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a buffer would exceed the device's
+    /// `max_storage_buffer_binding_size`, as the patch kernel binds it whole.
     pub fn new(device: &wgpu::Device, coords: &[PatchCoord]) -> Self {
         let words: Vec<u32> = coords.iter().flat_map(PatchCoord::to_words).collect();
         PatchCoordBuffer {
@@ -418,8 +447,9 @@ impl Evaluator {
     ///
     /// # Panics
     ///
-    /// Panics when the element lengths differ, or a buffer is too small
-    /// for its elements.
+    /// Panics when the element lengths differ, when a buffer is too small
+    /// for its elements, or when the part of a buffer the kernel uses is
+    /// larger than the device's `max_storage_buffer_binding_size`.
     pub fn eval_stencils(
         &self,
         device: &wgpu::Device,
@@ -429,8 +459,8 @@ impl Evaluator {
         dst: PrimvarBuffer<'_>,
     ) {
         assert_eq!(src.length, dst.length, "src and dst element lengths differ");
-        src.check(table.num_control_vertices, "stencil source");
-        dst.check(table.num_stencils, "stencil destination");
+        let src_size = src.binding_size(table.num_control_vertices, "stencil source");
+        let dst_size = dst.binding_size(table.num_stencils, "stencil destination");
         if table.num_stencils == 0 {
             return;
         }
@@ -449,14 +479,17 @@ impl Evaluator {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("opensubdiv stencil bindings"),
             layout: &self.stencil_layout,
-            entries: &bind_entries(&[
+            entries: &bind_entries(
+                device,
                 &params,
-                src.buffer,
-                dst.buffer,
-                &table.offsets,
-                &table.indices,
-                &table.weights,
-            ]),
+                &[
+                    ("stencil source", src.buffer, src_size),
+                    ("stencil destination", dst.buffer, dst_size),
+                    whole("stencil offsets", &table.offsets),
+                    whole("stencil indices", &table.indices),
+                    whole("stencil weights", &table.weights),
+                ],
+            ),
         });
         dispatch(
             encoder,
@@ -475,8 +508,9 @@ impl Evaluator {
     ///
     /// # Panics
     ///
-    /// Panics when the element lengths differ, or a buffer is too small
-    /// for its elements.
+    /// Panics when the element lengths differ, when a buffer is too small
+    /// for its elements, or when the part of a buffer the kernel uses is
+    /// larger than the device's `max_storage_buffer_binding_size`.
     pub fn eval_patches(
         &self,
         device: &wgpu::Device,
@@ -487,15 +521,15 @@ impl Evaluator {
         outputs: PatchOutputs<'_>,
     ) {
         let n = coords.len;
-        src.check(table.num_values, "patch source");
-        outputs.points.check(n, "patch points");
+        let src_size = src.binding_size(table.num_values, "patch source");
+        let points_size = outputs.points.binding_size(n, "patch points");
         assert_eq!(
             src.length, outputs.points.length,
             "src and dst element lengths differ"
         );
         for (output, what) in [(outputs.du, "patch du"), (outputs.dv, "patch dv")] {
             if let Some(output) = output {
-                output.check(n, what);
+                output.binding_size(n, what);
                 assert_eq!(
                     src.length, output.length,
                     "src and {what} element lengths differ"
@@ -512,6 +546,8 @@ impl Evaluator {
         let dv = outputs
             .dv
             .unwrap_or(PrimvarBuffer::new(&self.placeholder, 0, 0, 0));
+        let du_size = outputs.du.map_or(4, |du| du.binding_size(n, "patch du"));
+        let dv_size = outputs.dv.map_or(4, |dv| dv.binding_size(n, "patch dv"));
         let flags = outputs.du.is_some() as u32 | (outputs.dv.is_some() as u32) << 1;
         let params = [
             n,
@@ -531,17 +567,20 @@ impl Evaluator {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("opensubdiv patch bindings"),
             layout: &self.patch_layout,
-            entries: &bind_entries(&[
+            entries: &bind_entries(
+                device,
                 &params,
-                src.buffer,
-                outputs.points.buffer,
-                du.buffer,
-                dv.buffer,
-                &table.arrays,
-                &coords.buffer,
-                &table.indices,
-                &table.params,
-            ]),
+                &[
+                    ("patch source", src.buffer, src_size),
+                    ("patch points", outputs.points.buffer, points_size),
+                    ("patch du", du.buffer, du_size),
+                    ("patch dv", dv.buffer, dv_size),
+                    whole("patch arrays", &table.arrays),
+                    whole("patch coords", &coords.buffer),
+                    whole("patch indices", &table.indices),
+                    whole("patch params", &table.params),
+                ],
+            ),
         });
         dispatch(
             encoder,
@@ -578,19 +617,60 @@ fn dispatch(
     pass.dispatch_workgroups(groups[0], groups[1], 1);
 }
 
-fn bind_entries<'a>(buffers: &[&'a wgpu::Buffer]) -> Vec<wgpu::BindGroupEntry<'a>> {
-    buffers
-        .iter()
-        .enumerate()
-        .map(|(binding, buffer)| wgpu::BindGroupEntry {
-            binding: binding as u32,
-            resource: buffer.as_entire_binding(),
-        })
-        .collect()
+/// A storage binding over the whole of `buffer`.
+fn whole<'a>(what: &'a str, buffer: &'a wgpu::Buffer) -> (&'a str, &'a wgpu::Buffer, u64) {
+    (what, buffer, buffer.size())
+}
+
+/// The bind-group entries of a kernel: the uniform `params` at binding 0,
+/// then each storage buffer bound over its first `size` bytes (so that a
+/// large application buffer binds only the part the kernel uses).
+///
+/// # Panics
+///
+/// Panics when a storage binding exceeds the device's
+/// `max_storage_buffer_binding_size`, naming it, rather than leaving wgpu
+/// to reject the bind group.
+fn bind_entries<'a>(
+    device: &wgpu::Device,
+    params: &'a wgpu::Buffer,
+    storage: &[(&str, &'a wgpu::Buffer, u64)],
+) -> Vec<wgpu::BindGroupEntry<'a>> {
+    let limit = device.limits().max_storage_buffer_binding_size;
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: params.as_entire_binding(),
+    }];
+    for (k, &(what, buffer, size)) in storage.iter().enumerate() {
+        check_binding_size(what, size, limit);
+        entries.push(wgpu::BindGroupEntry {
+            binding: k as u32 + 1,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: 0,
+                size: wgpu::BufferSize::new(size),
+            }),
+        });
+    }
+    entries
+}
+
+fn check_binding_size(what: &str, size: u64, limit: u64) {
+    assert!(
+        size <= limit,
+        "{what}: the kernel binds {size} bytes, more than the device's \
+         max_storage_buffer_binding_size ({limit}); split the mesh or the \
+         evaluation, or request a device with a higher limit"
+    );
 }
 
 /// A storage buffer of `words`, padded to at least `min_words` (a binding
 /// must hold one element of its array, even for an empty table).
+///
+/// # Panics
+///
+/// Panics when the buffer would exceed the device's
+/// `max_storage_buffer_binding_size`: the kernels bind tables whole.
 fn storage_buffer(
     device: &wgpu::Device,
     label: &str,
@@ -599,6 +679,11 @@ fn storage_buffer(
 ) -> wgpu::Buffer {
     let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
     bytes.resize(bytes.len().max(4 * min_words), 0);
+    check_binding_size(
+        label,
+        bytes.len() as u64,
+        device.limits().max_storage_buffer_binding_size,
+    );
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
         contents: &bytes,
