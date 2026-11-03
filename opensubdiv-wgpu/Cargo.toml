@@ -2,7 +2,7 @@
 name = "opensubdiv-wgpu"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version.workspace = true
 authors = ["Philippe Llerena <philippe.llerena@forticheprod.com>"]
 license = "MIT"
 description = "wgpu compute kernels evaluating opensubdiv-rs stencil and patch tables on the GPU (the role of OpenSubdiv's Osd evaluators)"
@@ -11,11 +11,6 @@ documentation = "https://docs.rs/opensubdiv-wgpu"
 readme = "README.md"
 keywords = ["subdivision", "wgpu", "gpu", "catmull-clark", "loop"]
 categories = ["graphics", "rendering"]
-
-# A workspace of its own: the core crate keeps no dependencies and its
-# own MSRV, unaffected by wgpu's.
-[workspace]
-resolver = "3"
 
 [dependencies]
 opensubdiv-rs = { path = "..", version = "0.5" }

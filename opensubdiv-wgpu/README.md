@@ -37,7 +37,7 @@ See `examples/tessellate.rs`. It tessellates an adaptively refined cube on the
 GPU and writes it as OBJ:
 
 ```sh
-cargo run --example tessellate > cube.obj
+cargo run -p opensubdiv-wgpu --example tessellate > cube.obj
 ```
 
 ## Testing
@@ -54,11 +54,15 @@ validation test needs no adapter.
 
 ## Layout
 
-This crate has a workspace of its own, so that `opensubdiv-rs` keeps no
-dependencies and its own MSRV (1.85). This crate's MSRV is **1.90**, the
-highest `rust-version` among the current releases of its dependencies (wgpu
-30 needs 1.87; `ordered-float`, one of its dependencies, needs 1.90). It also
-uses Cargo's MSRV-aware resolver (`resolver = "3"`), so a future dependency
-release that needs a newer Rust is not picked up silently.
+This crate is a member of the opensubdiv-rs repository's Cargo workspace;
+only it depends on wgpu, and `opensubdiv-rs` keeps no dependencies. Run its
+checks from the repository root with `-p opensubdiv-wgpu` (or `--workspace`).
+
+The MSRV is **1.90**, shared with `opensubdiv-rs` through
+`[workspace.package]`. It is the highest `rust-version` among the current
+releases of this crate's dependencies: wgpu 30 needs 1.87, and
+`ordered-float`, one of wgpu's dependencies, needs 1.90. The workspace uses
+Cargo's MSRV-aware resolver (`resolver = "3"`), so a future dependency release
+that needs a newer Rust is not picked up silently.
 
 The crate contains no `unsafe` code.

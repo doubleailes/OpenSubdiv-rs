@@ -8,18 +8,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+The repository is one Cargo workspace with two crates: `opensubdiv-rs` (the root package) and `opensubdiv-wgpu/`. Its `default-members` is the root package alone, so a plain `cargo build`, `cargo test` or `cargo publish` acts on `opensubdiv-rs`. Pass `--workspace` (or `-p opensubdiv-wgpu`) to include the GPU crate.
+
 CI (`.github/workflows/ci.yml`) runs these on stable, and all must pass:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-It also builds on the MSRV, **Rust 1.85** (`cargo +1.85 build --all-targets`). Don't use newer language or std features. Raising the MSRV counts as a minor-version change.
+It also builds on the shared MSRV, **Rust 1.90** (`cargo +1.90 build --workspace --all-targets`), set once in `[workspace.package]`. Don't use newer language or std features. Raising the MSRV counts as a minor-version change. The workspace uses the MSRV-aware resolver (`resolver = "3"`). `opensubdiv-rs` itself must keep **no dependencies**; only `opensubdiv-wgpu` depends on wgpu.
 
-`opensubdiv-wgpu/` is a separate crate with **its own workspace** (so the core keeps no dependencies), MSRV **1.90**, and the MSRV-aware resolver. Root `cargo` commands don't touch it; run the same four checks from inside `opensubdiv-wgpu/`, plus `cargo +1.90 build --all-targets`. Its GPU tests (`tests/gpu.rs`) need an adapter. Mesa's lavapipe works (`apt-get install mesa-vulkan-drivers`). Without an adapter the tests skip, unless `OPENSUBDIV_WGPU_REQUIRE_GPU=1` is set, as it is in CI.
+`opensubdiv-wgpu`'s GPU tests (`opensubdiv-wgpu/tests/gpu.rs`) need an adapter. Mesa's lavapipe works (`apt-get install mesa-vulkan-drivers`). Without an adapter the tests skip, unless `OPENSUBDIV_WGPU_REQUIRE_GPU=1` is set, as it is in CI.
 
 Run part of the suite:
 
@@ -29,6 +31,8 @@ cargo test --test fvar seam             # tests in one file whose names contain 
 cargo test --lib gregory                # unit tests inside src/ matching "gregory"
 cargo test --doc                        # doctests (lib.rs example)
 cargo run --example far_tutorial_1_1 > cube.obj
+cargo test -p opensubdiv-wgpu          # the GPU crate (kernels need an adapter)
+cargo run -p opensubdiv-wgpu --example tessellate > cube.obj
 ```
 
 `tests/single_crease.rs` is the slowest file (~7 s in debug).

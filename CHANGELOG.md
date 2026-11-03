@@ -28,8 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `OsdEvaluatePatchBasis`) complete the kernel inputs, and
   `GpuPatchTable::evaluate` runs the kernel on the CPU as the reference for
   shader ports. Face-varying patches are not exported yet.
-- The companion crate `opensubdiv-wgpu` (in `opensubdiv-wgpu/`, a separate
-  workspace) runs the stencil and patch kernels on the GPU through wgpu.
+- The companion crate `opensubdiv-wgpu` (in `opensubdiv-wgpu/`, a member of
+  the repository's new Cargo workspace) runs the stencil and patch kernels
+  on the GPU through wgpu.
+
+### Changed
+
+- The MSRV is now **1.90**, shared by both crates of the workspace (wgpu
+  30's dependency tree needs it). `opensubdiv-rs` itself still has no
+  dependencies.
 
 ### Fixed
 

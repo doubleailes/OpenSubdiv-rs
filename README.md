@@ -315,17 +315,17 @@ Not yet ported (roadmap):
 ## GPU evaluation with wgpu
 
 The companion crate [`opensubdiv-wgpu`](opensubdiv-wgpu/) (in this
-repository, with its own workspace so that this crate keeps no dependencies)
+repository's Cargo workspace; this crate itself keeps no dependencies)
 runs the stencil and patch kernels on the GPU through wgpu — Vulkan, Metal,
 DX12, OpenGL or WebGPU. Its tests check the kernels against the CPU
 evaluation on a real adapter (Mesa's lavapipe in CI), and
-`cargo run --example tessellate` (from `opensubdiv-wgpu/`) tessellates a
-cube's limit surface on the GPU.
+`cargo run -p opensubdiv-wgpu --example tessellate` tessellates a cube's
+limit surface on the GPU.
 
 ## Minimum supported Rust version
 
-The MSRV is **1.85**, checked in CI. Raising it is treated as a
-minor-version change.
+The MSRV is **1.90**, shared by both crates of the workspace and checked in
+CI. Raising it is treated as a minor-version change.
 
 ## Changelog
 
