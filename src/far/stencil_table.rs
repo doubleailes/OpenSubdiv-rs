@@ -286,11 +286,82 @@ impl StencilTableFactory {
 
         build_table(num_control, limits)
     }
+
+    /// Append the stencils of a patch table's *local points* to the stencils
+    /// of its control values (`AppendLocalPointStencilTable`).
+    ///
+    /// `cv_stencils` must hold one stencil per patch control value — the
+    /// table [`StencilTableOptions::for_patch_controls`] builds — and
+    /// `local_point_stencils` the local points' stencils over those control
+    /// values, such as
+    /// [`GpuPatchTable::local_point_stencils`](crate::osd::GpuPatchTable::local_point_stencils).
+    /// The result keeps the stencils of `cv_stencils` and appends one per
+    /// local point, composed down to the control vertices of `cv_stencils`
+    /// (the base cage): applied to the base values, it produces the whole
+    /// buffer a [`GpuPatchTable`](crate::osd::GpuPatchTable) evaluates
+    /// against, control values then local points, in one pass.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `cv_stencils` has fewer stencils than
+    /// `local_point_stencils` has control vertices.
+    pub fn append_local_point_stencils(
+        cv_stencils: &StencilTable,
+        local_point_stencils: &StencilTable,
+    ) -> StencilTable {
+        assert!(
+            cv_stencils.num_stencils() >= local_point_stencils.num_control_vertices(),
+            "control-vertex stencil table has {} stencils but the local points depend on {} control values; \
+             build it with StencilTableOptions::for_patch_controls()",
+            cv_stencils.num_stencils(),
+            local_point_stencils.num_control_vertices()
+        );
+        let mut stencils: Vec<StencilAccumulator> = (0..cv_stencils.num_stencils())
+            .map(|i| {
+                let stencil = cv_stencils.stencil(i);
+                StencilAccumulator {
+                    entries: stencil
+                        .indices
+                        .iter()
+                        .copied()
+                        .zip(stencil.weights.iter().copied())
+                        .collect(),
+                }
+            })
+            .collect();
+        for i in 0..local_point_stencils.num_stencils() {
+            let local = local_point_stencils.stencil(i);
+            let mut composed = StencilAccumulator::default();
+            for (&cv, &w) in local.indices.iter().zip(local.weights) {
+                composed.add_with_weight(&stencils[cv as usize], w);
+            }
+            stencils.push(composed);
+        }
+        build_table(cv_stencils.num_control_vertices(), stencils)
+    }
 }
 
 fn identity_stencil(v: usize) -> StencilAccumulator {
     StencilAccumulator {
         entries: vec![(v as Index, 1.0)],
+    }
+}
+
+impl StencilTable {
+    /// A table of the given stencils, each a list of `(control vertex,
+    /// weight)` entries over `num_control_vertices` control vertices.
+    /// Entries are sorted by control vertex, as the factory's are.
+    pub(crate) fn from_stencils(
+        num_control_vertices: usize,
+        stencils: Vec<Vec<(Index, f32)>>,
+    ) -> StencilTable {
+        build_table(
+            num_control_vertices,
+            stencils
+                .into_iter()
+                .map(|entries| StencilAccumulator { entries })
+                .collect(),
+        )
     }
 }
 

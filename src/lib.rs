@@ -20,6 +20,11 @@
 //!   with [`far::TopologyRefiner::refine_uniform`], and primvar data is
 //!   interpolated between levels (and onto the limit surface) with a
 //!   [`far::PrimvarRefiner`].
+//! * [`osd`] — the backend-independent part of OpenSubdiv's GPU layer: a
+//!   [`far::PatchTable`] flattened into the buffers a GPU kernel reads
+//!   ([`osd::GpuPatchTable`]), and the patch basis those kernels evaluate
+//!   ([`osd::evaluate_patch_basis`]). It has no GPU dependency; any API can
+//!   upload the buffers.
 //!
 //! ## Example
 //!
@@ -87,14 +92,17 @@
 //! sparse levels, mixed-depth patches and optional single-crease patches
 //! for semi-sharp creases, restricted to selected faces if wanted with
 //! [`far::TopologyRefiner::refine_adaptive_selected`] and
-//! [`far::PatchTableFactory::create_with_options_selected`]) are supported. Not yet ported: the `Osd` GPU
-//! layer. See the project README for the roadmap.
+//! [`far::PatchTableFactory::create_with_options_selected`]) are supported,
+//! and so are the flat tables a GPU evaluator consumes ([`osd`]). Not yet
+//! ported: OpenSubdiv's per-API GPU back-ends themselves. See the project
+//! README for the roadmap.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod far;
+pub mod osd;
 pub mod sdc;
 pub mod vtr;
 

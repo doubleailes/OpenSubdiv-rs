@@ -28,9 +28,9 @@
 //!   channel ([`PatchTableOptions`]).
 
 mod fvar;
-mod gregory;
-mod loop_patch;
-mod patch_table;
+pub(crate) mod gregory;
+pub(crate) mod loop_patch;
+pub(crate) mod patch_table;
 mod primvar_refiner;
 mod ptex;
 mod stencil_table;

@@ -23,6 +23,7 @@ The port follows OpenSubdiv's layer structure one-to-one:
 | `sdc`  | `opensubdiv/sdc` | Scheme types (`Bilinear`, `Catmark`, `Loop`), subdivision `Options`, semi-sharp `Crease` rules (`Uniform` and `Chaikin`), and the scheme-specific subdivision & limit **masks** |
 | `vtr`  | `opensubdiv/vtr` | `Level` — flat-array topology of one refinement level (face-verts, face-edges, edge-verts, edge-faces, vert-faces, vert-edges, sharpness, tags); `Refinement` — one step of uniform or sparse quad/tri refinement |
 | `far`  | `opensubdiv/far` | `TopologyDescriptor`, `TopologyRefinerFactory`, `TopologyRefiner` / `TopologyLevel`, `PrimvarRefiner` (`interpolate`, `interpolate_face_varying`, `limit`, `limit_face_varying`), `StencilTable` / `StencilTableFactory`, `LimitStencilTable` / `LimitStencilTableFactory`, and `PatchTable` / `PatchTableFactory` / `PatchTableOptions` / `PatchMap` / `PatchParam` / `PtexIndices`, with face-varying patches |
+| `osd`  | `opensubdiv/osd` (backend-independent part) | `GpuPatchTable` — a patch table as flat GPU buffers in OpenSubdiv's layout (`PatchArray`, packed `PatchParam`, index buffer, end-cap local-point stencils), `PatchCoord`, and `evaluate_patch_basis`, the CPU reference of the patch kernel; no GPU dependency |
 
 ## Installation
 
@@ -180,6 +181,19 @@ provided out of the box for `f32`, `f64`, `[f32; N]` and `[f64; N]`.
   OpenSubdiv), B-spline or box-spline patches where the channel is regular,
   and Gregory end caps elsewhere. `AdaptiveOptions::consider_fvar_channels`
   isolates face-varying features as adaptive refinement isolates vertex ones
+- **GPU evaluation data** (`osd`): every table a GPU renderer's kernels
+  read, as plain arrays for any API (for example `wgpu` compute shaders).
+  `StencilTable::offsets` / `indices` / `weights` (and the limit-stencil
+  derivative weights) feed a stencil kernel; `GpuPatchTable` flattens a
+  `PatchTable` into OpenSubdiv's patch-array, index and packed patch-param
+  buffers — rotation applied to the control points, boundary masks for
+  phantom points, single-crease sharpness, non-quad roots — plus the
+  stencils of the Gregory end caps' local points, which
+  `StencilTableFactory::append_local_point_stencils` folds into the
+  control-vertex stencils so one pass fills the whole patch control
+  buffer. `GpuPatchTable::evaluate` runs the patch kernel on the CPU from
+  those buffers alone, and is tested against `PatchTable::evaluate`.
+  Face-varying patches and transition-edge tags are not exported yet
 - **Hole tags**, propagated through refinement
 - Topology validation with typed errors (degenerate faces, out-of-range
   indices, non-triangular meshes for Loop, …)
@@ -292,7 +306,12 @@ different depths evaluate the same limit surface.
 
 Not yet ported (roadmap):
 
-- The `Osd` GPU/compute back-ends
+- The `Osd` per-API back-ends (compute kernels and tessellation shaders).
+  The backend-independent data they consume is in the `osd` module; a
+  `wgpu` crate running it is planned separately, so this crate keeps no
+  dependencies
+- Face-varying patches in `GpuPatchTable`, and transition-edge tags for
+  hardware tessellation
 
 ## Minimum supported Rust version
 

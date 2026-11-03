@@ -320,7 +320,7 @@ struct PatchArray {
 }
 
 /// A borrowed view of one patch's data in a [`PatchTable`].
-enum PatchRef<'a> {
+pub(crate) enum PatchRef<'a> {
     /// A 4x4 control-vertex grid (row-major, rows along `t`), with
     /// `INDEX_INVALID` marking phantom boundary slots.
     Regular(&'a [Index; 16]),
@@ -350,7 +350,7 @@ enum PatchRef<'a> {
 /// Where the derived control points of one end-cap patch lie in
 /// [`LocalPoints`].
 #[derive(Debug, Clone, Copy)]
-enum LocalPointRange {
+pub(crate) enum LocalPointRange {
     /// Compact storage: the patch's `support_len` support vertices start at
     /// `support`, its points are consecutive from `first_point` and their
     /// entries consecutive from `first_entry`.
@@ -841,9 +841,20 @@ impl PatchTable {
     }
 
     /// The data of patch `patch`.
-    fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
+    pub(crate) fn patch_ref(&self, patch: usize) -> PatchRef<'_> {
         let (array, offset) = self.locate(patch);
         self.patches.patch_ref(array, offset)
+    }
+
+    /// Call `f(point, control value, weight)` for every stencil entry of
+    /// the `count` derived points of an end-cap patch's `range`, in order.
+    pub(crate) fn for_each_end_cap_entry(
+        &self,
+        range: LocalPointRange,
+        count: usize,
+        f: impl FnMut(usize, Index, f32),
+    ) {
+        self.patches.local_points.for_each_entry(range, count, f);
     }
 
     /// The basis type of patch `patch`.
@@ -2271,7 +2282,7 @@ fn fold_phantom_weights(cvs: &[Index; 16], weights: &mut [f32]) {
 
 /// Uniform cubic B-spline basis functions (and derivatives) over the
 /// central knot interval, `t ∈ [0, 1]`.
-fn bspline_basis(t: f32) -> ([f32; 4], [f32; 4]) {
+pub(crate) fn bspline_basis(t: f32) -> ([f32; 4], [f32; 4]) {
     let (b, d) = bspline_basis_f64(f64::from(t));
     (b.map(|x| x as f32), d.map(|x| x as f32))
 }
@@ -2378,7 +2389,11 @@ fn bspline_basis_f64(t: f64) -> ([f64; 4], [f64; 4]) {
 /// The basis along one parametric direction of a single-crease patch whose
 /// crease lies on the grid line at index 1 (`reversed == false`: `x = 0`)
 /// or 2 (`reversed == true`: `x = 1`) of that direction.
-fn crease_basis_oriented(x: f32, sharpness: f32, reversed: bool) -> ([f32; 4], [f32; 4]) {
+pub(crate) fn crease_basis_oriented(
+    x: f32,
+    sharpness: f32,
+    reversed: bool,
+) -> ([f32; 4], [f32; 4]) {
     if !reversed {
         return crease_basis(x, sharpness);
     }
