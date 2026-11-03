@@ -89,9 +89,8 @@ impl Gpu {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
         let view = staging.get_mapped_range(..).expect("mapped range");
-        view.chunks_exact(4)
-            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
+        let (words, _) = view.as_chunks::<4>();
+        words.iter().map(|&b| f32::from_ne_bytes(b)).collect()
     }
 
     fn submit(&self, record: impl FnOnce(&mut wgpu::CommandEncoder)) {

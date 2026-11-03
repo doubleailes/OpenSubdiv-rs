@@ -143,8 +143,12 @@ fn main() {
             .expect("poll");
         let bytes = staging.get_mapped_range(..).expect("mapped range");
         bytes
-            .chunks_exact(12)
-            .map(|c| [0, 4, 8].map(|k| f32::from_ne_bytes([c[k], c[k + 1], c[k + 2], c[k + 3]])))
+            .as_chunks::<4>()
+            .0
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|xyz| xyz.map(f32::from_ne_bytes))
             .collect()
     };
     let (points, du, dv) = (read(&points), read(&du), read(&dv));
