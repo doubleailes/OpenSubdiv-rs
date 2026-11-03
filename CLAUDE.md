@@ -19,7 +19,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 It also builds on the MSRV, **Rust 1.85** (`cargo +1.85 build --all-targets`). Don't use newer language or std features. Raising the MSRV counts as a minor-version change.
 
-`opensubdiv-wgpu/` is a separate crate with **its own workspace** (so the core keeps no dependencies), MSRV **1.87**, and the MSRV-aware resolver. Root `cargo` commands don't touch it; run the same four checks from inside `opensubdiv-wgpu/`, plus `cargo +1.87 build --all-targets`. Its GPU tests (`tests/gpu.rs`) need an adapter. Mesa's lavapipe works (`apt-get install mesa-vulkan-drivers`). Without an adapter the tests skip, unless `OPENSUBDIV_WGPU_REQUIRE_GPU=1` is set, as it is in CI.
+`opensubdiv-wgpu/` is a separate crate with **its own workspace** (so the core keeps no dependencies), MSRV **1.90**, and the MSRV-aware resolver. Root `cargo` commands don't touch it; run the same four checks from inside `opensubdiv-wgpu/`, plus `cargo +1.90 build --all-targets`. Its GPU tests (`tests/gpu.rs`) need an adapter. Mesa's lavapipe works (`apt-get install mesa-vulkan-drivers`). Without an adapter the tests skip, unless `OPENSUBDIV_WGPU_REQUIRE_GPU=1` is set, as it is in CI.
 
 Run part of the suite:
 

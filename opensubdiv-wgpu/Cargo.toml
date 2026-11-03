@@ -2,7 +2,7 @@
 name = "opensubdiv-wgpu"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.90"
 authors = ["Philippe Llerena <philippe.llerena@forticheprod.com>"]
 license = "MIT"
 description = "wgpu compute kernels evaluating opensubdiv-rs stencil and patch tables on the GPU (the role of OpenSubdiv's Osd evaluators)"

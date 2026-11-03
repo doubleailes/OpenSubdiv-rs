@@ -55,8 +55,10 @@ validation test needs no adapter.
 ## Layout
 
 This crate has a workspace of its own, so that `opensubdiv-rs` keeps no
-dependencies and its own MSRV. This crate's MSRV is **1.87** (wgpu's). It uses
-Cargo's MSRV-aware resolver (`resolver = "3"`), so dependencies resolve to
-versions that build on 1.87.
+dependencies and its own MSRV (1.85). This crate's MSRV is **1.90**, the
+highest `rust-version` among the current releases of its dependencies (wgpu
+30 needs 1.87; `ordered-float`, one of its dependencies, needs 1.90). It also
+uses Cargo's MSRV-aware resolver (`resolver = "3"`), so a future dependency
+release that needs a newer Rust is not picked up silently.
 
 The crate contains no `unsafe` code.
