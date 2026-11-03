@@ -66,3 +66,7 @@ Cargo's MSRV-aware resolver (`resolver = "3"`), so a future dependency release
 that needs a newer Rust is not picked up silently.
 
 The crate contains no `unsafe` code.
+
+It is not published yet (`publish = false`): it needs the `osd` API, which
+ships in opensubdiv-rs 0.6. Once that release is out, publishing means
+requiring `opensubdiv-rs = "0.6"` and removing `publish = false`.

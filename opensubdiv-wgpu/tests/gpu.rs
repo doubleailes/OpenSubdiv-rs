@@ -34,6 +34,11 @@ struct Gpu {
 /// The test device, or `None` (after a message) when no adapter exists and
 /// none is required.
 fn gpu() -> Option<Gpu> {
+    gpu_with_limits(Default::default())
+}
+
+/// The test device with `limits` (which may be lower than the adapter's).
+fn gpu_with_limits(limits: wgpu::Limits) -> Option<Gpu> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
@@ -46,8 +51,11 @@ fn gpu() -> Option<Gpu> {
             return None;
         }
     };
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&Default::default())).expect("device");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: limits,
+        ..Default::default()
+    }))
+    .expect("device");
     let evaluator = Evaluator::new(&device);
     Some(Gpu {
         device,
@@ -569,4 +577,83 @@ fn stencils_then_patches_in_one_submission() {
             .collect();
         assert_close(&extract(&gpu.read(&points), n, 0, 3), &expected, 1e-4, name);
     }
+}
+
+#[test]
+fn bindings_respect_the_device_binding_limit() {
+    // A device whose storage bindings are capped at 1 KiB.
+    let limit = 1024;
+    let Some(gpu) = gpu_with_limits(wgpu::Limits {
+        max_storage_buffer_binding_size: limit,
+        ..wgpu::Limits::default()
+    }) else {
+        return;
+    };
+    let mut cube = refiner(
+        sdc::SchemeType::Catmark,
+        sdc::Options::default(),
+        8,
+        &[4; 6],
+        &CUBE_FACE_VERTS,
+        None,
+    );
+    cube.refine_uniform(UniformOptions::new(1));
+    let table = StencilTableFactory::create(&cube, StencilTableOptions::default());
+    assert!(4 * table.weights().len() as u64 <= limit);
+    let mut expected = vec![[0.0f32; 3]; table.num_stencils()];
+    table.update_values(&CUBE_POSITIONS, &mut expected);
+
+    // Application buffers larger than the limit still work: only the part
+    // the elements reach is bound.
+    let buffers = StencilTableBuffers::new(&gpu.device, &table);
+    let mut src_data = interleave(&CUBE_POSITIONS, 0, 3);
+    src_data.resize(4 * limit as usize, 0.0);
+    let src = gpu.upload(&src_data);
+    let dst = gpu.output(8 * limit as usize);
+    assert!(src.size() > limit && dst.size() > limit);
+    gpu.submit(|encoder| {
+        gpu.evaluator.eval_stencils(
+            &gpu.device,
+            encoder,
+            &buffers,
+            PrimvarBuffer::new(&src, 0, 3, 3),
+            PrimvarBuffer::new(&dst, 0, 3, 3),
+        );
+    });
+    let actual = extract(&gpu.read(&dst), table.num_stencils(), 0, 3);
+    assert_close(&actual, &expected, 1e-5, "stencil");
+
+    // A table past the limit is refused when uploaded, by name.
+    cube.refine_uniform(UniformOptions::new(3));
+    let big = StencilTableFactory::create(&cube, StencilTableOptions::default());
+    let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        StencilTableBuffers::new(&gpu.device, &big);
+    }))
+    .expect_err("an oversized table is refused");
+    let message = message
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("max_storage_buffer_binding_size"),
+        "{message}"
+    );
+
+    // So is a primvar range past it.
+    let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        gpu.evaluator.eval_stencils(
+            &gpu.device,
+            &mut encoder,
+            &buffers,
+            PrimvarBuffer::new(&src, 0, 3, 3),
+            PrimvarBuffer::new(&dst, 2 * limit as u32, 3, 3),
+        );
+    }))
+    .expect_err("an oversized binding is refused");
+    let message = message
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(message.contains("stencil destination"), "{message}");
 }
