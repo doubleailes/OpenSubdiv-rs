@@ -118,6 +118,35 @@ impl StencilTable {
         }
     }
 
+    /// The start of every stencil in [`indices`](Self::indices) and
+    /// [`weights`](Self::weights), followed by their total length:
+    /// [`num_stencils`](Self::num_stencils)` + 1` entries, stencil `i`
+    /// covering `offsets[i]..offsets[i + 1]`.
+    ///
+    /// With [`indices`](Self::indices) and [`weights`](Self::weights), this
+    /// is the whole table as flat arrays, ready to upload to a GPU storage
+    /// buffer for a compute kernel computing, for each stencil `i`,
+    /// `dst[i] = Σ weights[j] · src[indices[j]]` over
+    /// `j ∈ offsets[i]..offsets[i + 1]` (the stencil kernel of OpenSubdiv's
+    /// `Osd` evaluators, whose separate `sizes` array is
+    /// `offsets[i + 1] - offsets[i]`). It is never empty: a table without
+    /// stencils has the offsets `[0]`.
+    pub fn offsets(&self) -> &[u32] {
+        &self.offsets
+    }
+
+    /// The control-vertex index of every stencil entry, all stencils
+    /// concatenated (`GetControlIndices`); see [`offsets`](Self::offsets).
+    pub fn indices(&self) -> &[Index] {
+        &self.indices
+    }
+
+    /// The weight of every stencil entry, all stencils concatenated
+    /// (`GetWeights`); see [`offsets`](Self::offsets).
+    pub fn weights(&self) -> &[f32] {
+        &self.weights
+    }
+
     /// Update every stencil value from the given control values
     /// (`UpdateValues`): `dst[i]` receives the weighted sum of
     /// `control_values` described by stencil `i`.
@@ -398,7 +427,26 @@ impl LimitStencilTable {
         }
     }
 
-    /// The position stencils alone, as a plain [`StencilTable`].
+    /// The weight of every stencil entry for the derivative along the
+    /// ptex-face `u` direction (`GetDuWeights`), parallel to
+    /// [`StencilTable::weights`] of the [`point_stencils`](Self::point_stencils):
+    /// the same [`offsets`](StencilTable::offsets) and
+    /// [`indices`](StencilTable::indices) apply.
+    pub fn du_weights(&self) -> &[f32] {
+        &self.du_weights
+    }
+
+    /// The weight of every stencil entry for the derivative along the
+    /// ptex-face `v` direction (`GetDvWeights`); see
+    /// [`du_weights`](Self::du_weights).
+    pub fn dv_weights(&self) -> &[f32] {
+        &self.dv_weights
+    }
+
+    /// The position stencils alone, as a plain [`StencilTable`]: its
+    /// [`offsets`](StencilTable::offsets), [`indices`](StencilTable::indices)
+    /// and [`weights`](StencilTable::weights) are the flat arrays of this
+    /// table.
     pub fn point_stencils(&self) -> &StencilTable {
         &self.points
     }

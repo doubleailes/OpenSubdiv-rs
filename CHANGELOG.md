@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Flat access to stencil tables for GPU upload: `StencilTable::offsets`,
+  `indices` and `weights`, and `LimitStencilTable::du_weights` and
+  `dv_weights`. They expose the tables as the plain arrays a compute kernel
+  (for example a wgpu/WGSL port of OpenSubdiv's `Osd` stencil kernel) reads
+  from storage buffers, computing `dst[i] = Σ weights[j] · src[indices[j]]`
+  over `offsets[i]..offsets[i + 1]`.
+
 ### Fixed
 
 - Chaikin creasing no longer averages infinitely sharp edges into the child

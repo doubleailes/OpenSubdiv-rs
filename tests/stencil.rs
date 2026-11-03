@@ -542,3 +542,112 @@ fn empty_limit_requests_need_no_patch_table() {
         Error::PatchesRequireRefinement
     );
 }
+
+/// A stand-in for a GPU stencil kernel (one invocation per stencil, as in
+/// OpenSubdiv's `Osd` evaluators): it sees only the flat `offsets`,
+/// `indices` and `weights` arrays, and `f32` vertex buffers laid out with a
+/// stride, as they would be uploaded to storage buffers.
+fn flat_stencil_kernel(
+    offsets: &[u32],
+    indices: &[u32],
+    weights: &[f32],
+    src: &[f32],
+    stride: usize,
+    len: usize,
+) -> Vec<f32> {
+    let num_stencils = offsets.len() - 1;
+    let mut dst = vec![0.0f32; num_stencils * stride];
+    for i in 0..num_stencils {
+        for j in offsets[i] as usize..offsets[i + 1] as usize {
+            let s = indices[j] as usize * stride;
+            for k in 0..len {
+                dst[i * stride + k] += weights[j] * src[s + k];
+            }
+        }
+    }
+    dst
+}
+
+/// Pack 3-vectors into a strided `f32` buffer, the trailing slots zero (as
+/// in a vec4-aligned GPU layout).
+fn to_strided(values: &[P3], stride: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; values.len() * stride];
+    for (i, v) in values.iter().enumerate() {
+        out[i * stride..i * stride + 3].copy_from_slice(v);
+    }
+    out
+}
+
+fn from_strided(buffer: &[f32], stride: usize) -> Vec<P3> {
+    buffer.chunks(stride).map(|c| [c[0], c[1], c[2]]).collect()
+}
+
+#[test]
+fn flat_stencil_arrays_reproduce_update_values() {
+    for table in [
+        StencilTableFactory::create(&cube_refiner(2), StencilTableOptions::default()),
+        StencilTableFactory::create(
+            &creased_cube_adaptive(3),
+            StencilTableOptions::for_patch_controls(),
+        ),
+        StencilTableFactory::create_limit(&cube_refiner(2)),
+    ] {
+        let (offsets, indices, weights) = (table.offsets(), table.indices(), table.weights());
+        assert_eq!(offsets.len(), table.num_stencils() + 1);
+        assert_eq!(offsets[0], 0);
+        assert!(offsets.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(*offsets.last().unwrap() as usize, indices.len());
+        assert_eq!(indices.len(), weights.len());
+        assert!(indices
+            .iter()
+            .all(|&cv| (cv as usize) < table.num_control_vertices()));
+        for i in 0..table.num_stencils() {
+            let stencil = table.stencil(i);
+            let range = offsets[i] as usize..offsets[i + 1] as usize;
+            assert_eq!(stencil.indices, &indices[range.clone()]);
+            assert_eq!(stencil.weights, &weights[range]);
+        }
+
+        let mut expected = vec![[0.0f32; 3]; table.num_stencils()];
+        table.update_values(&CUBE_POSITIONS, &mut expected);
+        let src = to_strided(&CUBE_POSITIONS, 4);
+        let dst = flat_stencil_kernel(offsets, indices, weights, &src, 4, 3);
+        assert_all_close(&from_strided(&dst, 4), &expected);
+    }
+}
+
+#[test]
+fn flat_limit_stencil_arrays_reproduce_update_derivs() {
+    let refiner = creased_cube_adaptive(3);
+    let (u, v): (Vec<f32>, Vec<f32>) = samples(60).into_iter().unzip();
+    let arrays: Vec<LocationArray> = (0..6)
+        .map(|f| LocationArray::new(f as u32, &u[10 * f..10 * f + 10], &v[10 * f..10 * f + 10]))
+        .collect();
+    let table = LimitStencilTableFactory::create(&refiner, &arrays, None, None).unwrap();
+    let points = table.point_stencils();
+    assert_eq!(table.du_weights().len(), points.weights().len());
+    assert_eq!(table.dv_weights().len(), points.weights().len());
+    for i in 0..table.num_stencils() {
+        let stencil = table.stencil(i);
+        let range = points.offsets()[i] as usize..points.offsets()[i + 1] as usize;
+        assert_eq!(stencil.du_weights, &table.du_weights()[range.clone()]);
+        assert_eq!(stencil.dv_weights, &table.dv_weights()[range]);
+    }
+
+    let n = table.num_stencils();
+    let mut expected = vec![[0.0f32; 3]; n];
+    let (mut du, mut dv) = (expected.clone(), expected.clone());
+    table.update_values(&CUBE_POSITIONS, &mut expected);
+    table.update_derivs(&CUBE_POSITIONS, &mut du, &mut dv);
+
+    let src = to_strided(&CUBE_POSITIONS, 3);
+    let kernel = |weights: &[f32]| {
+        from_strided(
+            &flat_stencil_kernel(points.offsets(), points.indices(), weights, &src, 3, 3),
+            3,
+        )
+    };
+    assert_all_close(&kernel(points.weights()), &expected);
+    assert_all_close(&kernel(table.du_weights()), &du);
+    assert_all_close(&kernel(table.dv_weights()), &dv);
+}
