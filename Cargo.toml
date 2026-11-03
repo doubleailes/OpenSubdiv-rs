@@ -1,8 +1,22 @@
+[workspace]
+members = [".", "opensubdiv-wgpu"]
+# Plain `cargo build` / `cargo test` at the root act on opensubdiv-rs only
+# (as does `cargo publish`); CI passes `--workspace`.
+default-members = ["."]
+# MSRV-aware dependency resolution: pick dependency versions that build on
+# `rust-version`.
+resolver = "3"
+
+[workspace.package]
+# The shared MSRV of both crates (the current wgpu 30 dependency tree needs
+# 1.90). Raising it is a minor-version change.
+rust-version = "1.90"
+
 [package]
 name = "opensubdiv-rs"
 version = "0.5.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version.workspace = true
 authors = ["Philippe Llerena <philippe.llerena@forticheprod.com>"]
 license = "MIT"
 description = "A faithful Rust port of Pixar's OpenSubdiv subdivision-surface library (Sdc / Vtr / Far layers)"

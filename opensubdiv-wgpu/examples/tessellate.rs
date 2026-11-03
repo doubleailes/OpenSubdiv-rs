@@ -2,7 +2,7 @@
 //! and write it as OBJ, with normals:
 //!
 //! ```sh
-//! cargo run --example tessellate > cube.obj
+//! cargo run -p opensubdiv-wgpu --example tessellate > cube.obj
 //! ```
 //!
 //! The per-frame work of a renderer, headless: one stencil dispatch refines
