@@ -306,12 +306,21 @@ different depths evaluate the same limit surface.
 
 Not yet ported (roadmap):
 
-- The `Osd` per-API back-ends (compute kernels and tessellation shaders).
-  The backend-independent data they consume is in the `osd` module; a
-  `wgpu` crate running it is planned separately, so this crate keeps no
-  dependencies
+- The `Osd` back-ends for other APIs, and hardware tessellation shaders.
+  The backend-independent data they consume is in the `osd` module; wgpu
+  compute kernels running it are in the companion crate below
 - Face-varying patches in `GpuPatchTable`, and transition-edge tags for
   hardware tessellation
+
+## GPU evaluation with wgpu
+
+The companion crate [`opensubdiv-wgpu`](opensubdiv-wgpu/) (in this
+repository, with its own workspace so that this crate keeps no dependencies)
+runs the stencil and patch kernels on the GPU through wgpu — Vulkan, Metal,
+DX12, OpenGL or WebGPU. Its tests check the kernels against the CPU
+evaluation on a real adapter (Mesa's lavapipe in CI), and
+`cargo run --example tessellate` (from `opensubdiv-wgpu/`) tessellates a
+cube's limit surface on the GPU.
 
 ## Minimum supported Rust version
 

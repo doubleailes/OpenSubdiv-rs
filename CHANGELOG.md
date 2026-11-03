@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `OsdEvaluatePatchBasis`) complete the kernel inputs, and
   `GpuPatchTable::evaluate` runs the kernel on the CPU as the reference for
   shader ports. Face-varying patches are not exported yet.
+- The companion crate `opensubdiv-wgpu` (in `opensubdiv-wgpu/`, a separate
+  workspace) runs the stencil and patch kernels on the GPU through wgpu.
 
 ### Fixed
 
