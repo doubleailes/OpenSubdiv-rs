@@ -14,7 +14,7 @@ rust-version = "1.90"
 
 [package]
 name = "opensubdiv-rs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["Philippe Llerena <philippe.llerena@forticheprod.com>"]
