@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`opensubdiv-rs` is a faithful, from-scratch Rust port of Pixar's OpenSubdiv (Sdc / Vtr / Far layers; the `Osd` GPU layer is not ported). It has **no dependencies** and **no `unsafe`** (`#![forbid(unsafe_code)]`); keep it that way. `#![warn(missing_docs)]` and `#![deny(rustdoc::broken_intra_doc_links)]` are on, so every public item needs a doc comment and intra-doc links must resolve.
+`opensubdiv-rs` is a faithful, from-scratch Rust port of Pixar's OpenSubdiv (Sdc / Vtr / Far layers, and the backend-independent data of the `Osd` GPU layer; the per-API GPU back-ends are not ported). It has **no dependencies** and **no `unsafe`** (`#![forbid(unsafe_code)]`); keep it that way. `#![warn(missing_docs)]` and `#![deny(rustdoc::broken_intra_doc_links)]` are on, so every public item needs a doc comment and intra-doc links must resolve.
 
 ## Commands
 
@@ -45,6 +45,7 @@ The modules mirror OpenSubdiv's layers one-to-one, and the doc comments name the
      - `PrimvarRefiner`: level-by-level interpolation and limit evaluation of anything implementing the `Primvar` trait.
      - `StencilTableFactory`: factorizes the refinement into stencils on the base cage.
      - `PatchTableFactory`: builds parametric patches, located with `PatchMap` and `PtexIndices`. `LimitStencilTableFactory` combines patch basis weights with control-vertex stencils.
+- **`osd`**: flat GPU buffers for the far tables, in OpenSubdiv's layout (`osd/types.h`, `osd/cpuPatchTable.cpp`, `osd/patchBasis.h`). `GpuPatchTable::new` turns a `PatchTable` into patch arrays, an index buffer and packed `PatchParam`s: it reorders each quad patch's control points to rotation 0, turns phantom slots into boundary masks, encodes inverted triangles and non-quad roots as OpenSubdiv does, and emits Gregory points as local points with their own stencil table. `evaluate_patch_basis` / `GpuPatchTable::evaluate` are the CPU reference a shader port must match. The module reaches into `far` through `pub(crate)` items (`PatchRef`, `for_each_end_cap_entry`, the basis functions).
 
 ### Cross-cutting design points
 
@@ -59,11 +60,12 @@ The modules mirror OpenSubdiv's layers one-to-one, and the doc comments name the
 
 ### Tests
 
-The integration tests in `tests/` are grouped by feature (catmark, chaikin, loop, fvar, fvar_patch, adaptive, patch, endcaps, single_crease, loop_patch, stencil, nonmanifold, selected_faces). Each file defines its own fixtures (such as the far-tutorial cube) and its own `assert_close` helper; there is no shared `common` module. The main checks are:
+The integration tests in `tests/` are grouped by feature (catmark, chaikin, loop, fvar, fvar_patch, adaptive, patch, endcaps, single_crease, loop_patch, stencil, nonmanifold, selected_faces, osd_patch). Each file defines its own fixtures (such as the far-tutorial cube) and its own `assert_close` helper; there is no shared `common` module. The main checks are:
 
 - The Gregory and Loop caps reduce to the exact B-spline or box-spline patch on regular neighborhoods, for arbitrary control data.
 - Adaptive and uniform evaluation agree on the same mesh.
 - `LimitStencilTable` reproduces `PatchTable::evaluate`.
+- `GpuPatchTable::evaluate`, reading only the flat buffers, reproduces `PatchTable::evaluate`.
 
 New features are expected to come with tests of the same kind.
 

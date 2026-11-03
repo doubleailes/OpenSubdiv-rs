@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (for example a wgpu/WGSL port of OpenSubdiv's `Osd` stencil kernel) reads
   from storage buffers, computing `dst[i] = Σ weights[j] · src[indices[j]]`
   over `offsets[i]..offsets[i + 1]`.
+- An `osd` module with the backend-independent data of OpenSubdiv's GPU
+  layer. `GpuPatchTable` flattens a `PatchTable` into OpenSubdiv's GPU
+  buffers: `PatchArray`s, an index buffer and packed `PatchParam`s (the
+  `Far::PatchParam` bit layout plus single-crease sharpness). Control
+  points are reordered to rotation 0, phantom points become boundary
+  masks, and inverted triangles and non-quad roots are encoded as
+  OpenSubdiv encodes them. The Gregory end caps' points become local points
+  with their own stencil table, which the new
+  `StencilTableFactory::append_local_point_stencils` composes with the
+  control-vertex stencils. `PatchCoord` and `evaluate_patch_basis` (a port
+  of `OsdEvaluatePatchBasis`) complete the kernel inputs, and
+  `GpuPatchTable::evaluate` runs the kernel on the CPU as the reference for
+  shader ports. Face-varying patches are not exported yet.
 
 ### Fixed
 
