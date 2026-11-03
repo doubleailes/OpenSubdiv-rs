@@ -19,6 +19,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 It also builds on the MSRV, **Rust 1.85** (`cargo +1.85 build --all-targets`). Don't use newer language or std features. Raising the MSRV counts as a minor-version change.
 
+`opensubdiv-wgpu/` is a separate crate with **its own workspace** (so the core keeps no dependencies), MSRV **1.87**, and the MSRV-aware resolver. Root `cargo` commands don't touch it; run the same four checks from inside `opensubdiv-wgpu/`, plus `cargo +1.87 build --all-targets`. Its GPU tests (`tests/gpu.rs`) need an adapter. Mesa's lavapipe works (`apt-get install mesa-vulkan-drivers`). Without an adapter the tests skip, unless `OPENSUBDIV_WGPU_REQUIRE_GPU=1` is set, as it is in CI.
+
 Run part of the suite:
 
 ```sh
@@ -45,6 +47,7 @@ The modules mirror OpenSubdiv's layers one-to-one, and the doc comments name the
      - `PrimvarRefiner`: level-by-level interpolation and limit evaluation of anything implementing the `Primvar` trait.
      - `StencilTableFactory`: factorizes the refinement into stencils on the base cage.
      - `PatchTableFactory`: builds parametric patches, located with `PatchMap` and `PtexIndices`. `LimitStencilTableFactory` combines patch basis weights with control-vertex stencils.
+- **`opensubdiv-wgpu`** (separate crate): WGSL ports of the stencil kernel and of `osd::evaluate_patch_basis` (`src/stencil.wgsl`, `src/patch.wgsl`), plus the wgpu host code. A change to the patch basis in `far`/`osd` must be mirrored in `patch.wgsl`; `tests/gpu.rs` compares the two.
 - **`osd`**: flat GPU buffers for the far tables, in OpenSubdiv's layout (`osd/types.h`, `osd/cpuPatchTable.cpp`, `osd/patchBasis.h`). `GpuPatchTable::new` turns a `PatchTable` into patch arrays, an index buffer and packed `PatchParam`s: it reorders each quad patch's control points to rotation 0, turns phantom slots into boundary masks, encodes inverted triangles and non-quad roots as OpenSubdiv does, and emits Gregory points as local points with their own stencil table. `evaluate_patch_basis` / `GpuPatchTable::evaluate` are the CPU reference a shader port must match. The module reaches into `far` through `pub(crate)` items (`PatchRef`, `for_each_end_cap_entry`, the basis functions).
 
 ### Cross-cutting design points
