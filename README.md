@@ -35,7 +35,7 @@ or, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-opensubdiv-rs = "0.1"
+opensubdiv-rs = "0.7"
 ```
 
 The crate has no dependencies and contains no `unsafe` code
