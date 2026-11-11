@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Licensing now covers the OpenSubdiv-derived code. Both crates are licensed
+  under `MIT AND LicenseRef-TOST-1.0` and ship OpenSubdiv's Tomorrow Open
+  Source Technology License 1.0 (`LICENSE-OPENSUBDIV`) and a `NOTICE` file
+  with Pixar's attribution notice and a statement of changes. The README
+  names the upstream license correctly (TOST-1.0, formerly "Modified Apache
+  2.0"). `opensubdiv-wgpu` now ships its license files.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added
