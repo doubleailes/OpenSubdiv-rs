@@ -70,3 +70,11 @@ The crate contains no `unsafe` code.
 It is not published yet (`publish = false`): it needs the `osd` API, which
 ships in opensubdiv-rs 0.6. Once that release is out, publishing means
 requiring `opensubdiv-rs = "0.6"` and removing `publish = false`.
+
+## License
+
+Licensed under `MIT AND LicenseRef-TOST-1.0`, like opensubdiv-rs: original
+code under the [MIT License](LICENSE), and the parts translated from
+OpenSubdiv (the WGSL kernels port its `Osd` layer) also under OpenSubdiv's
+[Tomorrow Open Source Technology License 1.0](LICENSE-OPENSUBDIV). See
+[NOTICE](NOTICE) for the upstream attribution and the statement of changes.

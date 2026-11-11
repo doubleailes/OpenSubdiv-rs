@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`opensubdiv-rs` is a faithful, from-scratch Rust port of Pixar's OpenSubdiv (Sdc / Vtr / Far layers, and the backend-independent data of the `Osd` GPU layer; the per-API GPU back-ends are not ported). It has **no dependencies** and **no `unsafe`** (`#![forbid(unsafe_code)]`); keep it that way. `#![warn(missing_docs)]` and `#![deny(rustdoc::broken_intra_doc_links)]` are on, so every public item needs a doc comment and intra-doc links must resolve.
+`opensubdiv-rs` is a faithful Rust port of Pixar's OpenSubdiv (Sdc / Vtr / Far layers, and the backend-independent data of the `Osd` GPU layer; the per-API GPU back-ends are not ported). It has **no dependencies** and **no `unsafe`** (`#![forbid(unsafe_code)]`); keep it that way. `#![warn(missing_docs)]` and `#![deny(rustdoc::broken_intra_doc_links)]` are on, so every public item needs a doc comment and intra-doc links must resolve.
 
 ## Commands
 
@@ -75,6 +75,10 @@ The integration tests in `tests/` are grouped by feature (catmark, chaikin, loop
 - `GpuPatchTable::evaluate`, reading only the flat buffers, reproduces `PatchTable::evaluate`.
 
 New features are expected to come with tests of the same kind.
+
+## Licensing
+
+The crates are `MIT AND LicenseRef-TOST-1.0`: original code is MIT, and the parts translated from OpenSubdiv stay under its Tomorrow Open Source Technology License 1.0. Each crate directory must ship `LICENSE`, `LICENSE-OPENSUBDIV` and `NOTICE` (`opensubdiv-wgpu/` holds copies, since a package only includes files inside its own directory); keep the copies identical. Don't copy OpenSubdiv's comments or text verbatim.
 
 ## Releases and changelog
 

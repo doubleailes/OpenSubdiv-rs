@@ -1,0 +1,29 @@
+opensubdiv-rs
+Copyright (c) 2026 Philippe Llerena
+
+This project is a Rust translation of OpenSubdiv. Its original Rust code is
+licensed under the MIT License (see LICENSE). The parts derived from
+OpenSubdiv's source code are also subject to the Tomorrow Open Source
+Technology License 1.0 (see LICENSE-OPENSUBDIV), under which OpenSubdiv is
+distributed.
+
+Statement of changes (TOST-1.0 / Apache-2.0 Section 4(b)): the OpenSubdiv
+files named in each Rust module's documentation were translated from C++ to
+Rust and modified (restructured, partly reimplemented, with the deviations
+listed in README.md under "Fidelity notes"). The WGSL shaders in
+opensubdiv-wgpu translate parts of OpenSubdiv's Osd layer. This project is not
+affiliated with or endorsed by Pixar or the OpenSubdiv contributors.
+
+The NOTICE file of OpenSubdiv follows, reproduced as required by Section 4(d):
+
+-------------------------------------------------------------------------------
+   OpenSubdiv
+   Copyright 2013 Pixar
+   All rights reserved.
+
+   This product includes software developed at:
+       Pixar (http://www.pixar.com/).
+       Dreamworks Animation (http://www.dreamworksanimation.com/)
+       Autodesk, Inc. (http://www.autodesk.com/).
+       Google, Inc. (http://www.google.com/).
+       DigitalFish (http://digitalfish.com/).

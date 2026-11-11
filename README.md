@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/opensubdiv-rs.svg)](https://crates.io/crates/opensubdiv-rs)
 [![docs.rs](https://img.shields.io/docsrs/opensubdiv-rs)](https://docs.rs/opensubdiv-rs)
 [![CI](https://github.com/doubleailes/OpenSubdiv-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/doubleailes/OpenSubdiv-rs/actions/workflows/ci.yml)
-[![license](https://img.shields.io/crates/l/opensubdiv-rs.svg)](LICENSE)
+[![license](https://img.shields.io/crates/l/opensubdiv-rs.svg)](#license)
 
 A faithful Rust port of [Pixar's OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv)
 subdivision-surface library.
@@ -333,8 +333,18 @@ Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-This crate is distributed under the [MIT License](LICENSE).
+Licensed under `MIT AND LicenseRef-TOST-1.0`:
 
-It is a from-scratch Rust port based on the algorithms and public reference
-implementation of [OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv),
-Copyright © Pixar, released under the Modified Apache 2.0 License.
+- The original Rust code of this crate is under the [MIT License](LICENSE).
+- The crate is a Rust translation of
+  [OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv), Copyright
+  2013 Pixar. The parts derived from it are also subject to OpenSubdiv's
+  license, the [Tomorrow Open Source Technology License 1.0](LICENSE-OPENSUBDIV)
+  (Apache License 2.0 with a modified Section 6, "Trademarks").
+
+The [NOTICE](NOTICE) file reproduces OpenSubdiv's attribution notice and
+states how the translated files were changed. Redistributions must keep
+`LICENSE`, `LICENSE-OPENSUBDIV` and `NOTICE`.
+
+This project is not affiliated with or endorsed by Pixar. "OpenSubdiv" names
+the upstream library this crate translates; no trademark rights are granted.
