@@ -337,8 +337,10 @@ Licensed under `MIT AND LicenseRef-TOST-1.0`:
 
 - The original Rust code of this crate is under the [MIT License](LICENSE).
 - The crate is a Rust translation of
-  [OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv), Copyright
-  2013 Pixar. The parts derived from it are also subject to OpenSubdiv's
+  [OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv), whose
+  translated files are Copyright 2013–2018 Pixar and Copyright 2014–2018
+  DreamWorks Animation LLC. Each translated file starts with a header naming
+  its OpenSubdiv sources and their copyright lines. The parts derived from it are also subject to OpenSubdiv's
   license, the [Tomorrow Open Source Technology License 1.0](LICENSE-OPENSUBDIV)
   (Apache License 2.0 with a modified Section 6, "Trademarks").
 

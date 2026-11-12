@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Each file translated from OpenSubdiv now starts with a header naming its
+  OpenSubdiv sources and their copyright lines (Pixar or DreamWorks Animation
+  LLC), as TOST-1.0 Section 4(c) requires. `NOTICE` and the README now name
+  DreamWorks Animation as a copyright holder alongside Pixar.
+
 ## [0.7.0] - 2026-11-11
 
 ### Changed

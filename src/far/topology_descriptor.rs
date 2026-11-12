@@ -1,3 +1,9 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/topologyDescriptor.h, far/topologyDescriptor.cpp — Copyright 2014
+//     DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Borrowed mesh-topology description (port of
 //! `opensubdiv/far/topologyDescriptor.h`).
 

@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   tutorials/far/tutorial_1_1/far_tutorial_1_1.cpp — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Port of OpenSubdiv's `far_tutorial_1_1`: instantiate a
 //! `Far::TopologyRefiner` from a descriptor for a cube, uniformly refine it,
 //! interpolate the vertex positions and print the refined mesh as an OBJ

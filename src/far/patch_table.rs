@@ -1,3 +1,11 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/patchTable.h, far/patchTable.cpp, far/patchTableFactory.h,
+//     far/patchTableFactory.cpp, far/patchParam.h, far/patchMap.h,
+//     far/patchBasis.cpp — Copyright 2013 Pixar.
+//   far/patchMap.cpp — Copyright 2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Patch tables for parametric limit-surface evaluation.
 //!
 //! Port of the essential functionality of `opensubdiv/far/patchTable.h`,

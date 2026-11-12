@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/catmarkPatchBuilder.cpp — Copyright 2018 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Gregory-basis end-cap patches for irregular faces.
 //!
 //! Port of the role of `opensubdiv/far/catmarkPatchBuilder.cpp`

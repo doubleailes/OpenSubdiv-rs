@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   vtr/level.h, vtr/level.cpp — Copyright 2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Topology of a single refinement level (port of `opensubdiv/vtr/level.h`).
 
 use std::collections::HashMap;

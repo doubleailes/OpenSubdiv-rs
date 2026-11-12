@@ -1,3 +1,10 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/stencilTable.h, far/stencilTableFactory.h, far/stencilTableFactory.cpp
+//     — Copyright 2013 Pixar.
+//   far/stencilTable.cpp — Copyright 2015 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Stencil tables (port of `opensubdiv/far/stencilTable.h`,
 //! `opensubdiv/far/stencilTableFactory.h` and the limit-stencil half of
 //! them, `Far::LimitStencilTable` / `Far::LimitStencilTableFactory`).
