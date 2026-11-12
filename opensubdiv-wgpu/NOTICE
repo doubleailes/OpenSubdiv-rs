@@ -28,7 +28,8 @@ translated files are:
    stencilTableFactory, patchTable, patchTableFactory, patchParam.h,
    patchMap.h and patchBasis.cpp; osd/types.h, patchBasisTypes.h,
    patchBasis.h, cpuPatchTable.cpp and glslComputeKernel.glsl; and
-   tutorials/far/tutorial_1_1.
+   tutorials/far/tutorial_1_1, whose cube mesh also appears in the crate
+   documentation, tests and examples.
 
 The NOTICE file of OpenSubdiv follows, reproduced as required by Section 4(d):
 

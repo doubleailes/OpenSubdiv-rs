@@ -1,3 +1,8 @@
+// Contains the cube mesh of OpenSubdiv's tutorials/far/tutorial_1_1
+// (https://github.com/PixarAnimationStudios/OpenSubdiv) — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Face-varying patches: `PatchTableOptions::generate_fvar_tables`,
 //! `PatchTable::evaluate_basis_face_varying` and
 //! `AdaptiveOptions::consider_fvar_channels`.
