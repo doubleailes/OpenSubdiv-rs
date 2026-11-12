@@ -1,3 +1,9 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   osd/glslComputeKernel.glsl — Copyright 2013 Pixar.
+//   osd/patchBasis.h — Copyright 2016-2018 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 // Patch evaluation: one invocation per patch coordinate (port of the patch
 // kernel of OpenSubdiv's Osd evaluators, osd/glslComputeKernel.glsl, with
 // the basis of opensubdiv-rs's `osd::evaluate_patch_basis`).

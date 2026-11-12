@@ -14,6 +14,22 @@ listed in README.md under "Fidelity notes"). The WGSL shaders in
 opensubdiv-wgpu translate parts of OpenSubdiv's Osd layer. This project is not
 affiliated with or endorsed by Pixar or the OpenSubdiv contributors.
 
+Copyright notices of the translated OpenSubdiv files (TOST-1.0 / Apache-2.0
+Section 4(c)): each translated file of this project starts with a header
+naming the OpenSubdiv files it derives from and their copyright lines. The
+translated files are:
+
+   Copyright 2014-2018 DreamWorks Animation LLC: the sdc and vtr layers, and
+   far/topologyRefiner, topologyRefinerFactory, topologyDescriptor,
+   primvarRefiner, patchMap.cpp, catmarkPatchBuilder.cpp and
+   loopPatchBuilder.cpp.
+
+   Copyright 2013-2018 Pixar: far/ptexIndices, stencilTable,
+   stencilTableFactory, patchTable, patchTableFactory, patchParam.h,
+   patchMap.h and patchBasis.cpp; osd/types.h, patchBasisTypes.h,
+   patchBasis.h, cpuPatchTable.cpp and glslComputeKernel.glsl; and
+   tutorials/far/tutorial_1_1.
+
 The NOTICE file of OpenSubdiv follows, reproduced as required by Section 4(d):
 
 -------------------------------------------------------------------------------

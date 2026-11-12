@@ -1,3 +1,10 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   osd/types.h — Copyright 2015 Pixar.
+//   osd/patchBasisTypes.h — Copyright 2018 Pixar.
+//   far/patchParam.h — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! The plain-data records a GPU evaluator reads: patch arrays, packed patch
 //! parameters and patch coordinates (port of `opensubdiv/osd/types.h` and
 //! of the `OsdPatchArray` / `OsdPatchParam` / `OsdPatchCoord` structs of

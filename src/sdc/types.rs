@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   sdc/types.h — Copyright 2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Basic scheme types and traits (port of `opensubdiv/sdc/types.h`).
 
 /// Enumerated type for all subdivision schemes supported by OpenSubdiv

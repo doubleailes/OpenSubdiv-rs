@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   osd/glslComputeKernel.glsl — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 // Stencil evaluation: one invocation per stencil (port of the stencil
 // kernel of OpenSubdiv's Osd evaluators, osd/glslComputeKernel.glsl).
 //

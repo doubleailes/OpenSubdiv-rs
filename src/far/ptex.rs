@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/ptexIndices.h, far/ptexIndices.cpp — Copyright 2015 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Ptex face indexing (port of `opensubdiv/far/ptexIndices.h`).
 
 use super::topology_refiner::TopologyRefiner;

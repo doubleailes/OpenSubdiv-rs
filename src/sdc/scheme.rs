@@ -1,3 +1,9 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   sdc/scheme.h, sdc/bilinearScheme.h, sdc/catmarkScheme.h, sdc/loopScheme.h
+//     — Copyright 2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Scheme-specific subdivision and limit masks.
 //!
 //! Port of `opensubdiv/sdc/scheme.h` and the scheme specializations in

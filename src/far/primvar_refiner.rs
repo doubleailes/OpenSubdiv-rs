@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/primvarRefiner.h — Copyright 2015 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Primvar interpolation between refinement levels and onto the limit
 //! surface (port of `opensubdiv/far/primvarRefiner.h`).
 

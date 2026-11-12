@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   osd/cpuPatchTable.cpp — Copyright 2015 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! A patch table flattened into the buffers a GPU evaluator reads (port of
 //! `opensubdiv/osd/cpuPatchTable.cpp`, the common source of OpenSubdiv's
 //! per-API patch tables, together with the end-cap local points of

@@ -1,3 +1,11 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   vtr/fvarLevel.h, vtr/fvarLevel.cpp, vtr/fvarRefinement.h,
+//     vtr/fvarRefinement.cpp, far/topologyRefiner.cpp — Copyright 2014
+//     DreamWorks Animation LLC.
+//   far/primvarRefiner.h — Copyright 2015 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Face-varying channel refinement.
 //!
 //! Port of the face-varying support spread across OpenSubdiv's

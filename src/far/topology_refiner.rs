@@ -1,3 +1,10 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/topologyRefiner.h, far/topologyRefiner.cpp,
+//     far/topologyRefinerFactory.h, far/topologyRefinerFactory.cpp — Copyright
+//     2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! The topology refiner and its factory (port of
 //! `opensubdiv/far/topologyRefiner.h` and
 //! `opensubdiv/far/topologyRefinerFactory.h`).

@@ -1,3 +1,9 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   far/loopPatchBuilder.cpp — Copyright 2018 DreamWorks Animation LLC.
+//   far/patchBasis.cpp — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Patches for the Loop scheme: quartic box-spline triangles on regular
 //! faces and Gregory triangle end caps on irregular ones.
 //!

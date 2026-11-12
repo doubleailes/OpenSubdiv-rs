@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   sdc/options.h — Copyright 2014 DreamWorks Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Standard subdivision options (port of `opensubdiv/sdc/options.h`).
 
 /// Boundary interpolation rules for vertex (position) data

@@ -1,3 +1,10 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   vtr/refinement.h, vtr/refinement.cpp, vtr/quadRefinement.cpp,
+//     vtr/triRefinement.cpp, vtr/sparseSelector.cpp — Copyright 2014 DreamWorks
+//     Animation LLC.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! One step of refinement between two levels (port of
 //! `opensubdiv/vtr/refinement.h` — the uniform `QuadRefinement` /
 //! `TriRefinement` paths plus the *sparse* (selected) refinement used by

@@ -1,3 +1,8 @@
+// Portions derived from OpenSubdiv (https://github.com/PixarAnimationStudios/OpenSubdiv):
+//   osd/patchBasis.h — Copyright 2016-2018 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Patch basis evaluation from a packed [`PatchParam`] (port of
 //! `OsdEvaluatePatchBasis` in `opensubdiv/osd/patchBasis.h`).
 //!
