@@ -1,3 +1,8 @@
+// Contains the cube mesh of OpenSubdiv's tutorials/far/tutorial_1_1
+// (https://github.com/PixarAnimationStudios/OpenSubdiv) — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! Gregory end caps for irregular faces on boundaries and infinitely sharp
 //! creases (GitHub issue #8): the patch table must never fall back to
 //! bilinear quads on manifold meshes, the caps must reproduce the boundary

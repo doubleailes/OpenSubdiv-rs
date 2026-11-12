@@ -1,3 +1,8 @@
+// Contains the cube mesh of OpenSubdiv's tutorials/far/tutorial_1_1
+// (https://github.com/PixarAnimationStudios/OpenSubdiv) — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! GPU kernel tests: the stencil and patch kernels, run on a real device,
 //! must reproduce the CPU evaluation of the same tables.
 //!

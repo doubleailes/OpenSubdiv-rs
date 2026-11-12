@@ -1,3 +1,8 @@
+// Contains the cube mesh of OpenSubdiv's tutorials/far/tutorial_1_1
+// (https://github.com/PixarAnimationStudios/OpenSubdiv) — Copyright 2013 Pixar.
+// Licensed under the Tomorrow Open Source Technology License 1.0; see
+// LICENSE-OPENSUBDIV at the root of this crate.
+
 //! GPU patch-table tests: the flat buffers of an `osd::GpuPatchTable`,
 //! evaluated the way a GPU kernel evaluates them, must reproduce
 //! `PatchTable::evaluate` — for every patch type, rotation, boundary mask,
